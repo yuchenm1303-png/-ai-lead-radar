@@ -1,8 +1,14 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  type ApiLead,
+  type LeadStatus,
+  fetchLeads,
+  scanNow,
+  updateLeadStatus as updateLeadStatusApi,
+} from "@/lib/api";
 
-type LeadStatus = "new" | "saved" | "contacted" | "ignored";
 type Lead = {
   id: number;
   source: string;
@@ -86,11 +92,75 @@ const statusCopy: Record<LeadStatus, string> = {
   ignored: "已忽略",
 };
 
+function relativeAge(value: string): string {
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return "刚刚";
+  const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60000));
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
+}
+
+function fromApiLead(lead: ApiLead): Lead {
+  return {
+    id: lead.id,
+    source: lead.source,
+    title: lead.title,
+    excerpt: lead.excerpt,
+    category: lead.category,
+    score: lead.score,
+    age: relativeAge(lead.published_at),
+    budget: lead.budget || "未公开",
+    status: lead.status,
+    signals: lead.signals,
+  };
+}
+
 export default function Home() {
   const [leads, setLeads] = useState(seedLeads);
   const [filter, setFilter] = useState("high");
   const [query, setQuery] = useState("");
   const [monitoring, setMonitoring] = useState(true);
+  const [apiMode, setApiMode] = useState<"connecting" | "live" | "mock">("connecting");
+  const [scanning, setScanning] = useState(false);
+  const [lastScan, setLastScan] = useState("等待连接");
+
+  const loadLiveLeads = async () => {
+    const remote = await fetchLeads();
+    setLeads(remote.map(fromApiLead));
+    setApiMode("live");
+    return remote;
+  };
+
+  useEffect(() => {
+    let active = true;
+
+    const connect = async () => {
+      try {
+        const remote = await fetchLeads();
+        if (!active) return;
+        if (remote.length > 0) {
+          setLeads(remote.map(fromApiLead));
+          setLastScan("已连接后端");
+        } else {
+          setLeads([]);
+          setLastScan("尚无数据");
+        }
+        setApiMode("live");
+      } catch {
+        if (!active) return;
+        setApiMode("mock");
+        setLastScan("演示数据");
+      }
+    };
+
+    void connect();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const visibleLeads = useMemo(() => {
     return leads.filter((lead) => {
@@ -105,8 +175,36 @@ export default function Home() {
     });
   }, [filter, leads, query]);
 
-  const updateStatus = (id: number, status: LeadStatus) => {
+  const updateStatus = async (id: number, status: LeadStatus) => {
+    const previous = leads;
     setLeads((current) => current.map((lead) => (lead.id === id ? { ...lead, status } : lead)));
+
+    if (apiMode !== "live") return;
+    try {
+      const updated = await updateLeadStatusApi(id, status);
+      setLeads((current) => current.map((lead) => (lead.id === id ? fromApiLead(updated) : lead)));
+    } catch {
+      setLeads(previous);
+    }
+  };
+
+  const handleScan = async () => {
+    if (apiMode !== "live") {
+      setLastScan("演示模式 · 未连接后端");
+      return;
+    }
+
+    setScanning(true);
+    setMonitoring(true);
+    try {
+      const result = await scanNow();
+      await loadLiveLeads();
+      setLastScan(`刚刚 · ${result.scanned} 条`);
+    } catch {
+      setLastScan("扫描失败");
+    } finally {
+      setScanning(false);
+    }
   };
 
   const highIntent = leads.filter((lead) => lead.score >= 80).length;
@@ -135,7 +233,7 @@ export default function Home() {
 
         <div className="service-status">
           <i className={monitoring ? "online" : "paused"} />
-          <span>{monitoring ? "Monitoring" : "Paused"}</span>
+          <span>{apiMode === "live" ? (monitoring ? "Monitoring" : "Paused") : "Demo"}</span>
         </div>
       </header>
 
@@ -148,10 +246,13 @@ export default function Home() {
         <div className="hero-actions">
           <div className="updated-box glass-lite">
             <span>LAST SCAN</span>
-            <strong>刚刚</strong>
+            <strong>{lastScan}</strong>
           </div>
-          <button className="primary-button" type="button" onClick={() => setMonitoring((value) => !value)}>
-            {monitoring ? "暂停监控" : "继续监控"}
+          <button className="primary-button" type="button" onClick={() => void handleScan()} disabled={scanning}>
+            {scanning ? "扫描中…" : "立即扫描"}
+          </button>
+          <button className="secondary-button" type="button" onClick={() => setMonitoring((value) => !value)}>
+            {monitoring ? "暂停" : "继续"}
           </button>
         </div>
       </section>
@@ -159,7 +260,7 @@ export default function Home() {
       <section className="status-strip glass">
         <div><span>监控状态</span><strong>{monitoring ? "运行中" : "已暂停"}</strong></div>
         <div><span>当前平台</span><strong>小红书 · MVP</strong></div>
-        <div><span>筛选策略</span><strong>AI 意向评分 ≥ 80</strong></div>
+        <div><span>数据模式</span><strong>{apiMode === "live" ? "本地 API" : apiMode === "connecting" ? "正在连接" : "前端演示"}</strong></div>
       </section>
 
       <section className="summary-grid">
@@ -175,7 +276,7 @@ export default function Home() {
             <div>
               <p className="kicker">LIVE OPPORTUNITIES</p>
               <h2>最新潜客</h2>
-              <p>先用模拟数据把界面与工作流跑通，后续接真实数据源。</p>
+              <p>{apiMode === "live" ? "已连接本地后端，状态修改会持久化保存。" : "后端未运行时自动使用演示数据，不影响查看 UI。"}</p>
             </div>
             <span className="result-count">{visibleLeads.length} 条</span>
           </div>
@@ -228,13 +329,13 @@ export default function Home() {
                   </div>
                 </div>
                 <div className="lead-actions">
-                  <button type="button" className="action-button strong" onClick={() => updateStatus(lead.id, "contacted")}>标记已联系</button>
-                  <button type="button" className="action-button" onClick={() => updateStatus(lead.id, "saved")}>收藏</button>
-                  <button type="button" className="action-button ghost" onClick={() => updateStatus(lead.id, "ignored")}>忽略</button>
+                  <button type="button" className="action-button strong" onClick={() => void updateStatus(lead.id, "contacted")}>标记已联系</button>
+                  <button type="button" className="action-button" onClick={() => void updateStatus(lead.id, "saved")}>收藏</button>
+                  <button type="button" className="action-button ghost" onClick={() => void updateStatus(lead.id, "ignored")}>忽略</button>
                 </div>
               </article>
             ))}
-            {visibleLeads.length === 0 && <div className="empty-state">没有符合当前筛选条件的项目。</div>}
+            {visibleLeads.length === 0 && <div className="empty-state">没有符合当前筛选条件的项目。可以点击“立即扫描”写入一批 Mock 数据测试完整流程。</div>}
           </div>
         </article>
 
@@ -270,7 +371,7 @@ export default function Home() {
           <span className="safe-pill">ASSISTED MONITORING</span>
         </div>
         <div className="monitor-grid">
-          <div className="monitor-item"><span>平台</span><strong>小红书</strong><small>优先接入公开搜索结果</small></div>
+          <div className="monitor-item"><span>平台</span><strong>小红书</strong><small>优先接入允许访问的公开搜索结果</small></div>
           <div className="monitor-item"><span>发现词</span><strong>有偿 · 找人 · 求开发</strong><small>与技术类别组合判断</small></div>
           <div className="monitor-item"><span>AI 判断</span><strong>需求 / 意向 / 匹配度</strong><small>过滤学习、教程和招聘噪音</small></div>
           <div className="monitor-item"><span>数据原则</span><strong>最小化保存</strong><small>保留摘要、时间、链接和评分</small></div>
