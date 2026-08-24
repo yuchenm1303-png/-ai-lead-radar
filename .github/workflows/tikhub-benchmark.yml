@@ -1,0 +1,63 @@
+name: TikHub Xiaohongshu Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Benchmark size"
+        required: true
+        default: quick
+        type: choice
+        options:
+          - quick
+          - full
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TIKHUB_API_KEY: ${{ secrets.TIKHUB_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate secret exists
+        run: |
+          if [ -z "$TIKHUB_API_KEY" ]; then
+            echo "Missing repository secret: TIKHUB_API_KEY"
+            exit 2
+          fi
+
+      - name: Run quick benchmark (5 requests)
+        if: ${{ inputs.mode == 'quick' }}
+        run: |
+          python backend/benchmarks/source_benchmark.py \
+            --provider tikhub \
+            --keyword "寻找开发团队" \
+            --keyword "AI智能体 开发团队" \
+            --keyword "找人做小程序" \
+            --keyword "找人做网站" \
+            --keyword "网站开发 有偿" \
+            --output-dir backend/benchmarks/output
+
+      - name: Run full benchmark (20 requests)
+        if: ${{ inputs.mode == 'full' }}
+        run: |
+          python backend/benchmarks/source_benchmark.py \
+            --provider tikhub \
+            --output-dir backend/benchmarks/output
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tikhub-xiaohongshu-benchmark-${{ github.run_id }}
+          path: backend/benchmarks/output/
+          if-no-files-found: warn
+          retention-days: 7
