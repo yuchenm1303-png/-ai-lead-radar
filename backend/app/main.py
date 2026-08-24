@@ -1,11 +1,29 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Literal
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 
-app = FastAPI(title="AI Lead Radar API", version="0.1.0")
+from .connectors.mock import MockConnector
+from .schemas import Lead, LeadCreate, LeadStatus, LeadStatusUpdate, MonitorStatus
+from .scoring import score_text
+from .storage import init_db, list_leads, update_lead_status, upsert_lead
+
+monitor_state: dict[str, object] = {
+    "running": False,
+    "mode": "mock",
+    "platforms": ["xiaohongshu"],
+    "last_scan_at": None,
+}
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="AI Lead Radar API", version="0.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,75 +33,92 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-LeadStatus = Literal["new", "saved", "contacted", "ignored"]
-
-
-class Lead(BaseModel):
-    id: int
-    source: str
-    title: str
-    excerpt: str
-    category: str
-    score: int = Field(ge=0, le=100)
-    published_at: datetime
-    budget: str | None = None
-    status: LeadStatus = "new"
-    url: str | None = None
-    signals: list[str] = []
-
-
-SAMPLE_LEADS = [
-    Lead(
-        id=1,
-        source="小红书",
-        title="想找人做一个预约类微信小程序，有偿",
-        excerpt="工作室需要预约、时间段选择和后台查看订单的小程序，预算可以沟通。",
-        category="微信小程序",
-        score=96,
-        published_at=datetime.now(timezone.utc),
-        budget="预算待聊",
-        signals=["有偿", "明确需求", "近期项目"],
-    ),
-    Lead(
-        id=2,
-        source="小红书",
-        title="公司准备做一个英文官网，求靠谱开发",
-        excerpt="主要用于海外客户展示产品，希望手机端适配，后续可能还要接询盘表单。",
-        category="企业官网",
-        score=93,
-        published_at=datetime.now(timezone.utc),
-        budget="未公开",
-        signals=["公司项目", "找开发", "官网"],
-    ),
-]
-
 
 @app.get("/health")
 def health() -> dict[str, object]:
     return {
         "ok": True,
         "service": "ai-lead-radar-api",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
 @app.get("/api/v1/leads", response_model=list[Lead])
-def list_leads(
+def get_leads(
     min_score: int = Query(default=0, ge=0, le=100),
     status: LeadStatus | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
 ) -> list[Lead]:
-    leads = [lead for lead in SAMPLE_LEADS if lead.score >= min_score]
-    if status is not None:
-        leads = [lead for lead in leads if lead.status == status]
-    return leads
+    return list_leads(min_score=min_score, status=status, limit=limit)
 
 
-@app.get("/api/v1/monitor/status")
-def monitor_status() -> dict[str, object]:
+@app.post("/api/v1/leads", response_model=Lead)
+def create_lead(payload: LeadCreate) -> Lead:
+    if payload.score == 0:
+        scored = score_text(payload.title, payload.excerpt)
+        payload = payload.model_copy(
+            update={
+                "score": scored.score,
+                "category": scored.category,
+                "signals": scored.signals,
+            }
+        )
+    return upsert_lead(payload)
+
+
+@app.patch("/api/v1/leads/{lead_id}/status", response_model=Lead)
+def patch_lead_status(lead_id: int, payload: LeadStatusUpdate) -> Lead:
+    lead = update_lead_status(lead_id, payload.status)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    return lead
+
+
+@app.get("/api/v1/monitor/status", response_model=MonitorStatus)
+def get_monitor_status() -> MonitorStatus:
+    return MonitorStatus(
+        running=bool(monitor_state["running"]),
+        mode=str(monitor_state["mode"]),
+        platforms=list(monitor_state["platforms"]),
+        last_scan_at=monitor_state["last_scan_at"],
+        note="Mock connector only. Real platform connectors are not enabled yet.",
+    )
+
+
+@app.post("/api/v1/monitor/scan")
+def run_mock_scan() -> dict[str, object]:
+    connector = MockConnector()
+    monitor_state["running"] = True
+
+    stored: list[Lead] = []
+    for raw in connector.fetch_latest():
+        scored = score_text(raw.title, raw.excerpt)
+        stored.append(
+            upsert_lead(
+                LeadCreate(
+                    source=raw.source,
+                    external_id=raw.external_id,
+                    title=raw.title,
+                    excerpt=raw.excerpt,
+                    category=scored.category,
+                    score=scored.score,
+                    published_at=raw.published_at,
+                    budget=raw.budget,
+                    url=raw.url,
+                    signals=scored.signals,
+                )
+            )
+        )
+
+    scan_time = datetime.now(timezone.utc)
+    monitor_state["last_scan_at"] = scan_time
+    monitor_state["running"] = False
+
     return {
-        "running": False,
-        "mode": "mock",
-        "platforms": ["xiaohongshu"],
-        "note": "MVP currently uses mock data; real data connectors are not enabled yet.",
+        "ok": True,
+        "connector": connector.name,
+        "scanned": len(stored),
+        "high_intent": sum(1 for lead in stored if lead.score >= 80),
+        "last_scan_at": scan_time.isoformat(),
     }
