@@ -1,81 +1,76 @@
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
+SERVICE_KEYWORDS = {
+    '微信小程序': ['小程序','微信小程序','预约小程序','商城小程序'],
+    '网页开发': ['网页','网站','官网','前端','后端','管理系统','h5'],
+    '独立站': ['独立站','shopify','跨境网站','英文官网'],
+    'Python / 数据': ['python','excel','数据处理','爬虫','脚本'],
+    'AI / 自动化': ['ai','智能体','大模型','自动化','软件开发'],
+}
+INTENT_WORDS = {'有偿':24,'预算':18,'多少钱':18,'报价':18,'找人':22,'求开发':26,'找开发':26,'帮忙做':22,'需要开发':24,'需要做':16,'急':16,'外包':24,'公司':8,'项目':8,'可以聊':8,'有没有人会':14,'求':8,'找谁':15,'想做':16,'想搞':16,'帮忙写':20,'有没有会':14}
+NEGATIVE_WORDS = ['学习','教程','课程','怎么学','学习路线','推荐课程','找工作','面试','源码分享','难吗']
+
+@dataclass(frozen=True)
+class PrefilterResult:
+    passed: bool
+    service_hits: list[str]
+    intent_hits: list[str]
+    negative_hits: list[str]
 
 @dataclass(frozen=True)
 class ScoreResult:
     score: int
     category: str
+    is_lead: bool
+    intent_score: int
+    fit_score: int
+    freshness_score: int
+    urgency: str
+    confidence: int
+    priority: str
+    budget: str | None
+    reason: str
     signals: list[str]
 
+def prefilter_text(title: str, excerpt: str='') -> PrefilterResult:
+    text = f'{title} {excerpt}'.lower()
+    service_hits = [name for name, words in SERVICE_KEYWORDS.items() if any(w.lower() in text for w in words)]
+    intent_hits = [w for w in INTENT_WORDS if w in text]
+    negative_hits = [w for w in NEGATIVE_WORDS if w in text]
+    passed = bool(service_hits and intent_hits) and not (negative_hits and len(intent_hits) <= 1)
+    return PrefilterResult(passed, service_hits, intent_hits, negative_hits)
 
-SERVICE_KEYWORDS = {
-    "微信小程序": ["小程序", "微信小程序", "预约小程序", "商城小程序"],
-    "网页开发": ["网页", "网站", "官网", "前端", "后端", "管理系统", "h5"],
-    "独立站": ["独立站", "shopify", "跨境网站", "英文官网"],
-    "Python / 数据": ["python", "excel", "数据处理", "爬虫", "自动化", "脚本"],
-    "AI 工具": ["ai", "智能体", "大模型", "机器人", "自动回复"],
-}
+def _freshness(published_at: datetime | None) -> int:
+    if not published_at: return 50
+    dt = published_at if published_at.tzinfo else published_at.replace(tzinfo=timezone.utc)
+    hours = max(0.0, (datetime.now(timezone.utc)-dt.astimezone(timezone.utc)).total_seconds()/3600)
+    if hours <= .5: return 100
+    if hours <= 2: return 94
+    if hours <= 6: return 86
+    if hours <= 24: return 72
+    if hours <= 72: return 52
+    if hours <= 168: return 35
+    return 15
 
-INTENT_SIGNALS = {
-    "有偿": 18,
-    "预算": 12,
-    "多少钱": 12,
-    "报价": 12,
-    "找人": 16,
-    "求开发": 18,
-    "求靠谱": 12,
-    "帮忙做": 14,
-    "需要做": 12,
-    "急": 10,
-    "公司": 7,
-    "项目": 7,
-    "可以聊": 5,
-}
-
-NEGATIVE_SIGNALS = {
-    "学习": -26,
-    "教程": -24,
-    "课程": -24,
-    "怎么学": -24,
-    "招聘": -12,
-    "找工作": -18,
-    "面试": -18,
-    "源码分享": -20,
-}
-
-
-def score_text(title: str, excerpt: str = "") -> ScoreResult:
-    text = f"{title} {excerpt}".lower()
-    score = 22
-    signals: list[str] = []
-    category = "其他开发"
-
-    category_hits: list[tuple[str, int]] = []
-    for name, keywords in SERVICE_KEYWORDS.items():
-        hits = sum(1 for keyword in keywords if keyword.lower() in text)
-        if hits:
-            category_hits.append((name, hits))
-
-    if category_hits:
-        category_hits.sort(key=lambda item: item[1], reverse=True)
-        category = category_hits[0][0]
-        score += min(24, 10 + category_hits[0][1] * 5)
-        signals.append(category)
-
-    for signal, weight in INTENT_SIGNALS.items():
-        if signal in text:
-            score += weight
-            signals.append(signal)
-
-    for signal, weight in NEGATIVE_SIGNALS.items():
-        if signal in text:
-            score += weight
-            signals.append(f"排除:{signal}")
-
-    if "有偿" in text and ("找人" in text or "帮忙" in text or "求" in text):
-        score += 10
-    if any(word in text for word in ["今天", "尽快", "马上", "急"]):
-        score += 5
-
+def score_text(title: str, excerpt: str='', published_at: datetime | None=None, budget: str | None=None) -> ScoreResult:
+    text = f'{title} {excerpt}'.lower()
+    pf = prefilter_text(title, excerpt)
+    category = pf.service_hits[0] if pf.service_hits else '其他开发'
+    intent = min(100, sum(INTENT_WORDS[w] for w in pf.intent_hits))
+    if any(w in text for w in ['有偿','预算','多少钱','报价']): intent = min(100, intent+12)
+    if pf.negative_hits: intent = max(0, intent-55)
+    fit = 92 if category != '其他开发' else 35
+    freshness = _freshness(published_at)
+    urgency = 'high' if any(w in text for w in ['急','今天','尽快','马上']) else ('medium' if any(w in text for w in ['近期','最近']) else 'low')
+    budget_signal = 100 if any(w in text for w in ['有偿','预算','多少钱','报价']) or budget else 35
+    urgency_bonus = 10 if urgency == 'high' else (5 if urgency == 'medium' else 0)
+    score = round(intent*.40 + freshness*.30 + fit*.20 + budget_signal*.10 + urgency_bonus)
+    is_lead = pf.passed and score >= 45 and not (pf.negative_hits and intent < 55)
+    if not is_lead: score = min(score, 39)
     score = max(0, min(100, score))
-    return ScoreResult(score=score, category=category, signals=signals[:6])
+    confidence = min(99, 58 + len(pf.service_hits)*9 + len(pf.intent_hits)*6 - len(pf.negative_hits)*12)
+    priority = 'high' if is_lead and score >= 85 else ('medium' if is_lead and score >= 65 else 'low')
+    signals = (pf.service_hits + pf.intent_hits + [f'排除:{x}' for x in pf.negative_hits])[:8]
+    reason = '；'.join(filter(None,[f'识别为{category}' if pf.service_hits else '', f"需求意向信号：{'、'.join(pf.intent_hits[:4])}" if pf.intent_hits else '', f"负向信号：{'、'.join(pf.negative_hits[:3])}" if pf.negative_hits else ''])) or '信号不足'
+    return ScoreResult(score, category, is_lead, intent, fit, freshness, urgency, confidence, priority, budget, reason, signals)
