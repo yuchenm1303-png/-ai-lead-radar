@@ -15,6 +15,22 @@ class MVPTests(unittest.TestCase):
     def test_real_need_passes(self):
         r=score_text('学校比赛需要做个网站，有偿','预算可以聊',datetime.now(timezone.utc))
         self.assertTrue(r.is_lead); self.assertGreaterEqual(r.score,65)
+    def test_xhs_direct_team_request_is_high_priority(self):
+        r=score_text(
+            '寻找ai智能体开发团队或个人，要求产品做成网页端登录使用',
+            '具体功能：围绕社交媒体平台寻找潜在客户，给我们推送，其他细节需要进一步沟通',
+            datetime.now(timezone.utc),
+        )
+        self.assertTrue(r.is_lead)
+        self.assertGreaterEqual(r.score,85)
+        self.assertEqual(r.priority,'high')
+        self.assertIn('明确找开发方',r.signals)
+    def test_learning_request_is_filtered_even_with_search_wording(self):
+        r=score_text('寻找适合学习AI开发的课程','推荐一下',datetime.now(timezone.utc))
+        self.assertFalse(r.is_lead)
+    def test_course_product_request_is_not_mistaken_for_learning(self):
+        r=score_text('找人开发在线课程网站','需要后台、登录和内容管理',datetime.now(timezone.utc))
+        self.assertTrue(r.is_lead)
     def test_learning_filtered(self):
         self.assertFalse(prefilter_text('Python 怎么学','求课程推荐').passed)
     def test_pipeline_and_dedupe(self):
