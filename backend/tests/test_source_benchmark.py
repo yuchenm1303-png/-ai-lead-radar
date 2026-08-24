@@ -1,7 +1,7 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import timezone
 
-from backend.benchmarks.source_benchmark import ProbeResult, _parse_datetime, extract_candidates, summarize
+from benchmarks.source_benchmark import ProbeResult, _parse_datetime, extract_candidates, summarize
 
 
 class SourceBenchmarkTests(unittest.TestCase):
