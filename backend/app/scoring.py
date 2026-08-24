@@ -1,4 +1,11 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from .ai.base import ClassificationResult
+from .ai.heuristic import HeuristicClassifier
+from .connectors.base import RawLead
 
 
 @dataclass(frozen=True)
@@ -8,74 +15,53 @@ class ScoreResult:
     signals: list[str]
 
 
-SERVICE_KEYWORDS = {
-    "微信小程序": ["小程序", "微信小程序", "预约小程序", "商城小程序"],
-    "网页开发": ["网页", "网站", "官网", "前端", "后端", "管理系统", "h5"],
-    "独立站": ["独立站", "shopify", "跨境网站", "英文官网"],
-    "Python / 数据": ["python", "excel", "数据处理", "爬虫", "自动化", "脚本"],
-    "AI 工具": ["ai", "智能体", "大模型", "机器人", "自动回复"],
-}
+def freshness_score(published_at: datetime, now: datetime | None = None) -> int:
+    now = now or datetime.now(timezone.utc)
+    if published_at.tzinfo is None:
+        published_at = published_at.replace(tzinfo=timezone.utc)
+    age_seconds = max(0.0, (now - published_at.astimezone(timezone.utc)).total_seconds())
+    minutes = age_seconds / 60
+    if minutes <= 15:
+        return 100
+    if minutes <= 60:
+        return 95
+    if minutes <= 360:
+        return 85
+    if minutes <= 1440:
+        return 70
+    if minutes <= 4320:
+        return 50
+    if minutes <= 10080:
+        return 30
+    return 15
 
-INTENT_SIGNALS = {
-    "有偿": 18,
-    "预算": 12,
-    "多少钱": 12,
-    "报价": 12,
-    "找人": 16,
-    "求开发": 18,
-    "求靠谱": 12,
-    "帮忙做": 14,
-    "需要做": 12,
-    "急": 10,
-    "公司": 7,
-    "项目": 7,
-    "可以聊": 5,
-}
 
-NEGATIVE_SIGNALS = {
-    "学习": -26,
-    "教程": -24,
-    "课程": -24,
-    "怎么学": -24,
-    "招聘": -12,
-    "找工作": -18,
-    "面试": -18,
-    "源码分享": -20,
-}
+def budget_urgency_score(classification: ClassificationResult, explicit_budget: str | None) -> int:
+    urgency = {"low": 25, "normal": 50, "high": 80, "urgent": 100}[classification.urgency]
+    budget_text = classification.budget_text or explicit_budget or ""
+    budget = 85 if budget_text and budget_text not in {"—", "未公开", "未提供"} else 40
+    return round(0.6 * urgency + 0.4 * budget)
+
+
+def final_score(classification: ClassificationResult, published_at: datetime, explicit_budget: str | None = None) -> tuple[int, int]:
+    fresh = freshness_score(published_at)
+    tail = budget_urgency_score(classification, explicit_budget)
+    score = round(
+        0.40 * classification.intent_score
+        + 0.30 * fresh
+        + 0.20 * classification.fit_score
+        + 0.10 * tail
+    )
+    if not classification.is_lead:
+        score = min(score, 49)
+    if classification.confidence < 0.5:
+        score = min(score, 69)
+    return max(0, min(100, score)), fresh
 
 
 def score_text(title: str, excerpt: str = "") -> ScoreResult:
-    text = f"{title} {excerpt}".lower()
-    score = 22
-    signals: list[str] = []
-    category = "其他开发"
-
-    category_hits: list[tuple[str, int]] = []
-    for name, keywords in SERVICE_KEYWORDS.items():
-        hits = sum(1 for keyword in keywords if keyword.lower() in text)
-        if hits:
-            category_hits.append((name, hits))
-
-    if category_hits:
-        category_hits.sort(key=lambda item: item[1], reverse=True)
-        category = category_hits[0][0]
-        score += min(24, 10 + category_hits[0][1] * 5)
-        signals.append(category)
-
-    for signal, weight in INTENT_SIGNALS.items():
-        if signal in text:
-            score += weight
-            signals.append(signal)
-
-    for signal, weight in NEGATIVE_SIGNALS.items():
-        if signal in text:
-            score += weight
-            signals.append(f"排除:{signal}")
-
-    if "有偿" in text and ("找人" in text or "帮忙" in text or "求" in text):
-        score += 10
-    if any(word in text for word in ["今天", "尽快", "马上", "急"]):
-        score += 5
-
-    score = max(0, min(100, score))
-    return ScoreResult(score=score, category=category, signals=signals[:6])
+    now = datetime.now(timezone.utc)
+    raw = RawLead("manual", None, title, excerpt, now)
+    classified = HeuristicClassifier().classify(raw)
+    score, _ = final_score(classified, now)
+    return ScoreResult(score=score, category=classified.need_type, signals=list(classified.signals))
