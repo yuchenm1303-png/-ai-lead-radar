@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "AI Lead Radar Browser Helper",
+  "version": "0.1.0",
+  "description": "把你正在浏览的公开需求一键送入 AI Lead Radar 做去重、筛选和评分。",
+  "permissions": ["activeTab", "scripting"],
+  "action": {
+    "default_title": "送入 AI Lead Radar",
+    "default_popup": "popup.html"
+  }
+}

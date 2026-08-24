@@ -1,0 +1,20 @@
+:root { color-scheme: dark; font-family: ui-rounded, "SF Pro Rounded", "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+* { box-sizing: border-box; }
+body { width: 320px; margin: 0; color: #fff; background: #15171d; }
+main { padding: 18px; }
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand > span { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; background: rgba(255,255,255,.06); font-weight: 700; }
+.brand strong, .brand small { display: block; }
+.brand strong { font-size: 14px; }
+.brand small { margin-top: 2px; color: rgba(255,255,255,.48); font-size: 10px; letter-spacing: .08em; }
+.intro { margin: 16px 0; color: rgba(255,255,255,.58); font-size: 12px; line-height: 1.65; }
+button { width: 100%; margin-top: 8px; padding: 12px 13px; border: 1px solid rgba(255,255,255,.12); border-radius: 8px; color: #fff; background: rgba(255,255,255,.05); text-align: left; cursor: pointer; }
+button:hover { background: rgba(255,255,255,.09); }
+button:active { transform: scale(.985); }
+button.primary { background: rgba(255,255,255,.11); }
+button strong, button small { display: block; }
+button strong { font-size: 13px; }
+button small { margin-top: 4px; color: rgba(255,255,255,.44); font-size: 10px; }
+button:disabled { opacity: .48; cursor: wait; }
+#status { min-height: 18px; margin: 13px 1px 8px; color: rgba(255,255,255,.52); font-size: 11px; }
+a { color: rgba(255,255,255,.72); font-size: 11px; text-decoration: none; }

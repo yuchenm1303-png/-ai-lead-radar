@@ -35,3 +35,13 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m compileall app
       - run: python -m unittest discover -s tests -v
+
+  browser-helper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node --check browser-helper/popup.js
+      - run: node -e "const fs=require('fs'); const m=JSON.parse(fs.readFileSync('browser-helper/manifest.json','utf8')); if(m.manifest_version!==3) process.exit(1);"
