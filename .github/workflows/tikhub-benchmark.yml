@@ -34,6 +34,11 @@ jobs:
             exit 2
           fi
 
+      - name: Check TikHub account and key status
+        run: |
+          python backend/benchmarks/tikhub_account_status.py \
+            --output-dir backend/benchmarks/output
+
       - name: Run quick benchmark (5 requests)
         if: ${{ inputs.mode == 'quick' }}
         run: |
@@ -52,6 +57,23 @@ jobs:
           python backend/benchmarks/source_benchmark.py \
             --provider tikhub \
             --output-dir backend/benchmarks/output
+
+      - name: Assert at least one API request succeeded
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          reports = sorted(Path('backend/benchmarks/output').glob('source-benchmark-*.json'))
+          if not reports:
+              raise SystemExit('No benchmark report was produced.')
+          report = json.loads(reports[-1].read_text(encoding='utf-8'))
+          rows = report.get('results', [])
+          successful = sum(1 for row in rows if row.get('ok'))
+          print(f'Successful API requests: {successful}/{len(rows)}')
+          if successful == 0:
+              raise SystemExit('All TikHub benchmark requests failed. See report artifact for details.')
+          PY
 
       - name: Upload benchmark report
         if: always()
