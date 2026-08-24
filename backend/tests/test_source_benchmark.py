@@ -1,7 +1,9 @@
+import json
 import unittest
 from datetime import timezone
 
 from benchmarks.source_benchmark import ProbeResult, _parse_datetime, extract_candidates, summarize
+from benchmarks.tikhub_account_status import _safe_error_payload
 
 
 class SourceBenchmarkTests(unittest.TestCase):
@@ -67,6 +69,23 @@ class SourceBenchmarkTests(unittest.TestCase):
         self.assertEqual(data["median_latency_ms"], 200)
         self.assertEqual(data["median_newest_age_minutes"], 10.0)
         self.assertEqual(data["url_coverage_rate"], 0.667)
+
+    def test_tikhub_error_payload_keeps_nested_reason_and_redacts_sensitive_values(self):
+        raw = json.dumps(
+            {
+                "detail": {
+                    "message": "API token demo-secret has no route access",
+                    "required_scope": "/api/v1/tikhub/user/",
+                    "email": "person@example.com",
+                }
+            }
+        ).encode("utf-8")
+        payload = _safe_error_payload(raw, 403, "demo-secret")
+        rendered = json.dumps(payload, ensure_ascii=False)
+        self.assertEqual(payload["http_status"], 403)
+        self.assertIn("required_scope", rendered)
+        self.assertNotIn("demo-secret", rendered)
+        self.assertNotIn("person@example.com", rendered)
 
 
 if __name__ == "__main__":
