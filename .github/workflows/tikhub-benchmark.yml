@@ -35,6 +35,7 @@ jobs:
           fi
 
       - name: Check TikHub account and key status
+        continue-on-error: true
         run: |
           python backend/benchmarks/tikhub_account_status.py \
             --output-dir backend/benchmarks/output
