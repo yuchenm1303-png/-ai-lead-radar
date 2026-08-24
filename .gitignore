@@ -1,0 +1,22 @@
+# Node / Next.js
+web/node_modules/
+web/.next/
+web/out/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

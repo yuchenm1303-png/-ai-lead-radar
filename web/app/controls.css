@@ -1,0 +1,32 @@
+.secondary-button {
+  min-height: 48px;
+  padding: 0 15px;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 8px;
+  color: rgba(255,255,255,.66);
+  cursor: pointer;
+  background: rgba(0,0,0,.12);
+  transition: .2s ease;
+}
+
+.secondary-button:hover {
+  color: #fff;
+  background: rgba(255,255,255,.07);
+}
+
+.primary-button:disabled,
+.secondary-button:disabled {
+  opacity: .52;
+  cursor: wait;
+  transform: none;
+}
+
+@media (max-width: 760px) {
+  .hero-actions {
+    flex-wrap: wrap;
+  }
+
+  .secondary-button {
+    flex: 0 0 auto;
+  }
+}
