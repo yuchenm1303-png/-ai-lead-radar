@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -14,23 +15,60 @@ REQUIRED_SCOPES = {
     "/api/v1/tikhub/user/",
     "/api/v1/xiaohongshu/app_v2/",
 }
+_SENSITIVE_KEYS = {
+    "authorization",
+    "token",
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "apikey",
+    "secret",
+    "email",
+}
+_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 
 
-def _safe_error_payload(raw: bytes, status: int) -> dict[str, Any]:
+def _redact_text(text: str, api_key: str) -> str:
+    value = text
+    if api_key:
+        value = value.replace(api_key, "[REDACTED_API_KEY]")
+    value = _EMAIL_RE.sub("[REDACTED_EMAIL]", value)
+    return value[:2000]
+
+
+def _sanitize_value(value: Any, api_key: str) -> Any:
+    if isinstance(value, dict):
+        safe: dict[str, Any] = {}
+        for key, child in value.items():
+            key_text = str(key)
+            if key_text.lower() in _SENSITIVE_KEYS:
+                safe[key_text] = "[REDACTED]"
+            else:
+                safe[key_text] = _sanitize_value(child, api_key)
+        return safe
+    if isinstance(value, list):
+        return [_sanitize_value(child, api_key) for child in value[:50]]
+    if isinstance(value, str):
+        return _redact_text(value, api_key)
+    return value
+
+
+def _safe_error_payload(raw: bytes, status: int, api_key: str = "") -> dict[str, Any]:
     text = raw.decode("utf-8", errors="replace")
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
-        return {"ok": False, "http_status": status, "message": text[:200]}
+        return {
+            "ok": False,
+            "http_status": status,
+            "response_text": _redact_text(text, api_key),
+        }
 
-    if not isinstance(payload, dict):
-        return {"ok": False, "http_status": status, "message": str(payload)[:200]}
-
-    safe: dict[str, Any] = {"ok": False, "http_status": status}
-    for key in ("code", "message", "message_zh", "detail", "router"):
-        if key in payload and not isinstance(payload[key], (dict, list)):
-            safe[key] = payload[key]
-    return safe
+    return {
+        "ok": False,
+        "http_status": status,
+        "response": _sanitize_value(payload, api_key),
+    }
 
 
 def fetch_status(api_key: str, timeout: int = 30) -> tuple[int, dict[str, Any]]:
@@ -46,7 +84,7 @@ def fetch_status(api_key: str, timeout: int = 30) -> tuple[int, dict[str, Any]]:
         with urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
     except HTTPError as exc:
-        return 1, _safe_error_payload(exc.read(), exc.code)
+        return 1, _safe_error_payload(exc.read(), exc.code, api_key)
     except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         return 1, {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:240]}
 
