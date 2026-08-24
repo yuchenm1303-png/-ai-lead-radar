@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AI Lead Radar Helper</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main>
+    <div class="brand"><span>AR</span><div><strong>AI Lead Radar</strong><small>Browser Helper</small></div></div>
+    <p class="intro">只在你主动点击时读取当前可见页面，不读取 Cookie，不绕登录或验证码。</p>
+    <button id="captureNote" class="primary" type="button"><strong>捕获当前帖子</strong><small>适合小红书笔记详情页</small></button>
+    <button id="captureList" type="button"><strong>捕获当前页候选</strong><small>批量整理当前可见搜索结果</small></button>
+    <div id="status" role="status">等待操作</div>
+    <a href="https://smirel.com/radar/" target="_blank" rel="noreferrer">打开 Radar ↗</a>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
