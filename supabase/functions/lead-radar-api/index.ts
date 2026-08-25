@@ -61,6 +61,44 @@ async function sha256(value) {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(bytes)].map((x) => x.toString(16).padStart(2, "0")).join("");
 }
+function candidateIdentity(item) {
+  if (item.external_id) return `${item.source}|id:${item.external_id}`;
+  return `${item.source}|url:${item.url || ""}|title:${item.title.toLowerCase()}`;
+}
+async function findSeen(item, dedupeKey) {
+  if (item.external_id) {
+    return await rest(`lead_radar_seen_items?source=eq.${encodeURIComponent(item.source)}&source_id=eq.${encodeURIComponent(item.external_id)}&select=id,disposition,lead_id&limit=1`);
+  }
+  return await rest(`lead_radar_seen_items?dedupe_key=eq.${dedupeKey}&select=id,disposition,lead_id&limit=1`);
+}
+async function touchSeen(id) {
+  await rest(`lead_radar_seen_items?id=eq.${id}`, {
+    method: "PATCH",
+    headers: { Prefer: "return=minimal" },
+    body: JSON.stringify({ last_seen_at: new Date().toISOString() })
+  });
+}
+async function createSeen(item, dedupeKey) {
+  const rows = await rest("lead_radar_seen_items?select=*", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({
+      source: item.source,
+      source_id: item.external_id,
+      dedupe_key: dedupeKey,
+      disposition: "seen",
+      metadata: { published_at: item.published_at, url: item.url }
+    })
+  });
+  return rows?.[0] || null;
+}
+async function updateSeen(id, disposition, leadId = null) {
+  await rest(`lead_radar_seen_items?id=eq.${id}`, {
+    method: "PATCH",
+    headers: { Prefer: "return=minimal" },
+    body: JSON.stringify({ disposition, lead_id: leadId, last_seen_at: new Date().toISOString() })
+  });
+}
 function safeUrl(value) {
   if (!value) return null;
   try { const url = new URL(String(value)); return ["http:", "https:"].includes(url.protocol) ? url.href : null; }
@@ -205,7 +243,7 @@ Deno.serve(async (req) => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^.*\/lead-radar-api/, "") || "/";
     if (method === "GET" && path === "/health") {
-      return json({ ok: true, service: "lead-radar-api", version: "0.6-edge", timestamp: new Date().toISOString(), ai_provider: OPENAI_KEY && OPENAI_MODEL ? "openai" : "rules" }, 200, origin);
+      return json({ ok: true, service: "lead-radar-api", version: "0.7-edge", timestamp: new Date().toISOString(), ai_provider: OPENAI_KEY && OPENAI_MODEL ? "openai" : "rules" }, 200, origin);
     }
     if (method === "GET" && path === "/api/v1/leads") {
       const min = Math.max(0, Math.min(100, Number(url.searchParams.get("min_score") || 0)));
@@ -234,20 +272,58 @@ Deno.serve(async (req) => {
       for (const raw of rawItems) {
         const item = normalizedItem(raw);
         if (!item) { filtered += 1; continue; }
-        const dedupeKey = await sha256(`${item.source}|${item.external_id || ""}|${item.url || ""}|${item.title.toLowerCase()}`);
-        const existing = await rest(`lead_radar_leads?dedupe_key=eq.${dedupeKey}&select=id,status`);
-        if (existing?.length) { duplicates += 1; leadIds.push(existing[0].id); continue; }
-        const analysis = await analyze(item);
-        if (!analysis) { filtered += 1; continue; }
-        const payload = { source: item.source, source_id: item.external_id, title: item.title, excerpt: item.excerpt, url: item.url, published_at: item.published_at, discovered_at: new Date().toISOString(), dedupe_key: dedupeKey, ...analysis, updated_at: new Date().toISOString() };
-        const rows = await rest("lead_radar_leads?select=*", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(payload) });
-        if (rows?.[0]) { stored += 1; leadIds.push(rows[0].id); if (await notifyHighLead(rows[0])) notified += 1; }
+        const dedupeKey = await sha256(candidateIdentity(item));
+        let seenRows = await findSeen(item, dedupeKey);
+        let seen = seenRows?.[0] || null;
+        if (seen && seen.disposition !== "error") {
+          duplicates += 1;
+          await touchSeen(seen.id);
+          if (seen.lead_id) leadIds.push(seen.lead_id);
+          continue;
+        }
+
+        const existing = await rest(item.external_id
+          ? `lead_radar_leads?source=eq.${encodeURIComponent(item.source)}&source_id=eq.${encodeURIComponent(item.external_id)}&select=id,status&limit=1`
+          : `lead_radar_leads?dedupe_key=eq.${dedupeKey}&select=id,status&limit=1`);
+        if (existing?.length) {
+          if (!seen) seen = await createSeen(item, dedupeKey);
+          if (seen) await updateSeen(seen.id, "stored", existing[0].id);
+          duplicates += 1;
+          leadIds.push(existing[0].id);
+          continue;
+        }
+
+        if (!seen) seen = await createSeen(item, dedupeKey);
+        else await updateSeen(seen.id, "seen", null);
+        if (!seen) throw new Error("Failed to create candidate seen record");
+
+        try {
+          const analysis = await analyze(item);
+          if (!analysis) {
+            filtered += 1;
+            await updateSeen(seen.id, "filtered", null);
+            continue;
+          }
+          const payload = { source: item.source, source_id: item.external_id, title: item.title, excerpt: item.excerpt, url: item.url, published_at: item.published_at, discovered_at: new Date().toISOString(), dedupe_key: dedupeKey, ...analysis, updated_at: new Date().toISOString() };
+          const rows = await rest("lead_radar_leads?select=*", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify(payload) });
+          if (rows?.[0]) {
+            stored += 1;
+            leadIds.push(rows[0].id);
+            await updateSeen(seen.id, "stored", rows[0].id);
+            if (await notifyHighLead(rows[0])) notified += 1;
+          } else {
+            await updateSeen(seen.id, "error", null);
+          }
+        } catch (error) {
+          await updateSeen(seen.id, "error", null);
+          throw error;
+        }
       }
       return json({ ok: true, received: rawItems.length, stored, filtered, duplicates, notified, lead_ids: leadIds }, 200, origin);
     }
     if (method === "GET" && path === "/api/v1/monitor/status") {
       const runs = await rest("lead_radar_scan_runs?select=*&order=started_at.desc&limit=1");
-      return json({ running: false, mode: "production-source-collector", platforms: ["justone-xiaohongshu-v4", "manual", "browser-helper"], last_scan_at: runs?.[0]?.finished_at || null, ai_provider: OPENAI_KEY && OPENAI_MODEL ? "openai" : "rules", notification_enabled: Boolean(FEISHU_WEBHOOK_URL), note: "Xiaohongshu source collection is handled by an authenticated GitHub Actions collector; manual/browser-assisted import remains available. No anti-bot bypass." }, 200, origin);
+      return json({ running: false, mode: "production-source-collector", platforms: ["justone-xiaohongshu-v4", "manual", "browser-helper"], last_scan_at: runs?.[0]?.finished_at || null, ai_provider: OPENAI_KEY && OPENAI_MODEL ? "openai" : "rules", notification_enabled: Boolean(FEISHU_WEBHOOK_URL), note: "Xiaohongshu source collection is handled by an authenticated GitHub Actions collector; every candidate is deduped before semantic AI. Manual/browser-assisted import remains available. No anti-bot bypass." }, 200, origin);
     }
     if (method === "POST" && path === "/api/v1/monitor/scan") {
       if (!ALLOWED.has(origin)) return json({ detail: "Write origin required" }, 403, origin);
