@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
+import re
 import statistics
 import time
 from dataclasses import asdict, dataclass
@@ -40,8 +42,9 @@ DEFAULT_KEYWORDS = [
 
 TITLE_KEYS = ("display_title", "title", "note_title", "name")
 DESC_KEYS = ("desc", "description", "content", "note_desc", "text")
-ID_KEYS = ("note_id", "noteId", "id")
+ID_KEYS = ("note_id", "noteId", "id", "contentId", "content_id")
 TIME_KEYS = (
+    "createTime",
     "create_time",
     "created_at",
     "publish_time",
@@ -50,7 +53,7 @@ TIME_KEYS = (
     "time",
     "post_time",
 )
-URL_KEYS = ("url", "share_url", "note_url", "web_url", "link")
+URL_KEYS = ("url", "share_url", "note_url", "web_url", "link", "originalUrl")
 
 
 @dataclass(frozen=True)
@@ -99,8 +102,7 @@ def _json_get(url: str, headers: dict[str, str], timeout: int) -> Any:
         },
     )
     with urlopen(req, timeout=timeout) as response:
-        body = response.read()
-        text = body.decode("utf-8", errors="replace")
+        text = response.read().decode("utf-8", errors="replace")
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
@@ -121,9 +123,8 @@ class TikHubProvider(Provider):
                 "time_filter": "一天内",
             }
         )
-        url = f"https://api.tikhub.io/api/v1/xiaohongshu/app_v2/search_notes?{params}"
         return _json_get(
-            url,
+            f"https://api.tikhub.io/api/v1/xiaohongshu/app_v2/search_notes?{params}",
             {"Authorization": f"Bearer {os.environ[self.env_key].strip()}"},
             timeout,
         )
@@ -134,16 +135,12 @@ class RnoteProvider(Provider):
     env_key = "RNOTE_API_KEY"
 
     def fetch(self, keyword: str, timeout: int) -> Any:
-        params = urlencode(
-            {
-                "keyword": keyword,
-                "page": 1,
-                "sort": "time_descending",
-                "note_type": 0,
-            }
+        params = urlencode({"keyword": keyword, "page": 1, "sort": "time_descending", "note_type": 0})
+        return _json_get(
+            f"https://rnote.dev/api/v2/crawler/search/notes?{params}",
+            {"X-API-Key": os.environ[self.env_key].strip()},
+            timeout,
         )
-        url = f"https://rnote.dev/api/v2/crawler/search/notes?{params}"
-        return _json_get(url, {"X-API-Key": os.environ[self.env_key].strip()}, timeout)
 
 
 class JustOneProvider(Provider):
@@ -161,8 +158,14 @@ class JustOneProvider(Provider):
                 "timeFilter": "ONE_DAY",
             }
         )
-        url = f"https://api.justoneapi.com/api/xiaohongshu/search-note/v4?{params}"
-        return _json_get(url, {}, timeout)
+        payload = _json_get(
+            f"https://api.justoneapi.com/api/xiaohongshu/search-note/v4?{params}",
+            {},
+            timeout,
+        )
+        if isinstance(payload, dict) and payload.get("code") not in (None, 0):
+            raise RuntimeError(f"Just One business error {payload.get('code')}: {payload.get('message') or payload.get('msg') or ''}")
+        return payload
 
 
 PROVIDERS = [TikHubProvider(), RnoteProvider(), JustOneProvider()]
@@ -219,14 +222,31 @@ def _parse_datetime(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _external_id_from_url(url: str) -> str:
+    if not url:
+        return ""
+    match = re.search(r"/(?:explore|discovery/item)/([0-9a-zA-Z]+)", url)
+    if match:
+        return match.group(1)
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
+    return f"url-{digest}"
+
+
 def _looks_like_note(node: dict[str, Any]) -> bool:
-    keys = set(node)
-    if "note_id" in keys or "noteId" in keys:
+    if any(key in node for key in ("note_id", "noteId", "contentId", "content_id")):
         return True
     title = _first_text(node, TITLE_KEYS)
     desc = _first_text(node, DESC_KEYS)
     url = _first_text(node, URL_KEYS).lower()
-    return bool((title or desc) and ("xiaohongshu.com" in url or "xhslink.com" in url))
+    source = str(node.get("sourceName") or node.get("source") or "").lower()
+    return bool(
+        (title or desc)
+        and (
+            "xiaohongshu.com" in url
+            or "xhslink.com" in url
+            or source in {"小红书", "xiaohongshu", "rednote"}
+        )
+    )
 
 
 def extract_candidates(payload: Any) -> tuple[int, list[Candidate]]:
@@ -235,11 +255,13 @@ def extract_candidates(payload: Any) -> tuple[int, list[Candidate]]:
     seen: set[str] = set()
 
     for node in raw_nodes:
-        external_id = str(_first_scalar(node, ID_KEYS) or "").strip()
         title = _first_text(node, TITLE_KEYS)
         excerpt = _first_text(node, DESC_KEYS)
         published_at = _parse_datetime(_first_scalar(node, TIME_KEYS))
         url = _first_text(node, URL_KEYS) or None
+        external_id = str(_first_scalar(node, ID_KEYS) or "").strip()
+        if not external_id and url:
+            external_id = _external_id_from_url(url)
 
         if not external_id or not published_at or not (title or excerpt):
             continue
@@ -251,7 +273,7 @@ def extract_candidates(payload: Any) -> tuple[int, list[Candidate]]:
             title = excerpt[:100].strip()
         if not excerpt:
             excerpt = title
-        if not url and len(external_id) >= 16:
+        if not url and len(external_id) >= 16 and not external_id.startswith("url-"):
             url = f"https://www.xiaohongshu.com/explore/{external_id}"
 
         candidates.append(
@@ -273,10 +295,7 @@ def probe(provider: Provider, keyword: str, timeout: int = 90) -> ProbeResult:
         payload = provider.fetch(keyword, timeout)
         raw_count, candidates = extract_candidates(payload)
         now = datetime.now(timezone.utc)
-        ages = [
-            max(0.0, (now - item.published_at).total_seconds() / 60.0)
-            for item in candidates
-        ]
+        ages = [max(0.0, (now - item.published_at).total_seconds() / 60.0) for item in candidates]
         return ProbeResult(
             provider=provider.name,
             keyword=keyword,
@@ -313,11 +332,7 @@ def summarize(results: list[ProbeResult]) -> list[dict[str, Any]]:
         rows = [row for row in results if row.provider == provider_name]
         ok_rows = [row for row in rows if row.ok]
         latencies = [row.latency_ms for row in ok_rows]
-        ages = [
-            row.newest_age_minutes
-            for row in ok_rows
-            if row.newest_age_minutes is not None
-        ]
+        ages = [row.newest_age_minutes for row in ok_rows if row.newest_age_minutes is not None]
         normalized = sum(row.normalized_candidates for row in ok_rows)
         urls = sum(row.url_coverage for row in ok_rows)
         summary.append(
@@ -342,13 +357,11 @@ def write_reports(results: list[ProbeResult], output_dir: Path) -> tuple[Path, P
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     csv_path = output_dir / f"source-benchmark-{stamp}.csv"
     json_path = output_dir / f"source-benchmark-{stamp}.json"
-
     with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(asdict(results[0]).keys()))
         writer.writeheader()
         for row in results:
             writer.writerow(asdict(row))
-
     json_path.write_text(
         json.dumps(
             {
@@ -365,25 +378,11 @@ def write_reports(results: list[ProbeResult], output_dir: Path) -> tuple[Path, P
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Benchmark Xiaohongshu search data providers for AI Lead Radar."
-    )
-    parser.add_argument(
-        "--provider",
-        action="append",
-        choices=[p.name for p in PROVIDERS],
-        help="Provider to test. Repeatable.",
-    )
-    parser.add_argument(
-        "--keyword",
-        action="append",
-        help="Keyword to test. Repeatable. Defaults to the Radar query set.",
-    )
+    parser = argparse.ArgumentParser(description="Benchmark Xiaohongshu search data providers for AI Lead Radar.")
+    parser.add_argument("--provider", action="append", choices=[p.name for p in PROVIDERS])
+    parser.add_argument("--keyword", action="append")
     parser.add_argument("--timeout", type=int, default=90)
-    parser.add_argument(
-        "--output-dir",
-        default=str(Path(__file__).resolve().parent / "output"),
-    )
+    parser.add_argument("--output-dir", default=str(Path(__file__).resolve().parent / "output"))
     args = parser.parse_args()
 
     selected_names = set(args.provider or [p.name for p in PROVIDERS])
@@ -399,16 +398,10 @@ def main() -> int:
         for keyword in keywords:
             row = probe(provider, keyword, timeout=args.timeout)
             results.append(row)
-            status = "ok" if row.ok else "fail"
-            newest = (
-                f"{row.newest_age_minutes:.1f}m"
-                if row.newest_age_minutes is not None
-                else "-"
-            )
+            newest = f"{row.newest_age_minutes:.1f}m" if row.newest_age_minutes is not None else "-"
             print(
-                f"[{status}] {provider.name:<8} {keyword:<18} "
-                f"{row.latency_ms:>5}ms normalized={row.normalized_candidates:<3} "
-                f"newest={newest}"
+                f"[{'ok' if row.ok else 'fail'}] {provider.name:<8} {keyword:<18} "
+                f"{row.latency_ms:>5}ms normalized={row.normalized_candidates:<3} newest={newest}"
             )
 
     if not results:
