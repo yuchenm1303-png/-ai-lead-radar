@@ -40,7 +40,7 @@ jobs:
         if: ${{ inputs.mode == 'free-smoke' }}
         run: |
           python backend/benchmarks/justone_cross_search_smoke.py \
-            --keyword "寻找开发团队" \
+            --keyword "找人做小程序" \
             --hours 24 \
             --output-dir backend/benchmarks/output
 
@@ -48,7 +48,7 @@ jobs:
         if: ${{ inputs.mode == 'dedicated-smoke' }}
         run: |
           python backend/benchmarks/justone_smoke.py \
-            --keyword "寻找开发团队" \
+            --keyword "找人做小程序" \
             --output-dir backend/benchmarks/output
 
       - name: Run dedicated Note Search V4 quick benchmark (5 requests)
@@ -56,11 +56,11 @@ jobs:
         run: |
           python backend/benchmarks/source_benchmark.py \
             --provider justone \
-            --keyword "寻找开发团队" \
-            --keyword "AI智能体 开发团队" \
             --keyword "找人做小程序" \
+            --keyword "有没有会做小程序的" \
             --keyword "找人做网站" \
             --keyword "网站开发 有偿" \
+            --keyword "软件开发 外包" \
             --output-dir backend/benchmarks/output
 
       - name: Run dedicated Note Search V4 full benchmark (20 requests)
