@@ -41,11 +41,15 @@ async function rest(path: string, init: RequestInit = {}) {
   return text ? JSON.parse(text) : null;
 }
 
-function b64urlBytes(value: string): Uint8Array {
+function b64urlBytes(value: string): Uint8Array<ArrayBuffer> {
   let base64 = value.replace(/-/g, "+").replace(/_/g, "/");
   while (base64.length % 4) base64 += "=";
   const binary = atob(base64);
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }
 
 function decodeJsonPart(value: string): Record<string, unknown> {
