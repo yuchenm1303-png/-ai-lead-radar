@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from benchmarks.source_benchmark import JustOneProvider, extract_candidates
+from source_benchmark import JustOneProvider, extract_candidates
 
 
 def _business_message(payload: dict[str, Any]) -> str:
