@@ -44,7 +44,7 @@ class MVPTests(unittest.TestCase):
     def test_recruiting_is_not_a_lead(self):
         r=score_text('海大有同学找实习吗？网站开发实习生','公司在学校旁边，主要工作是网站开发',datetime.now(timezone.utc))
         self.assertFalse(r.is_lead)
-        self.assertIn('招聘/实习', r.signals)
+        self.assertIn('排除:招聘/实习', r.signals)
     def test_content_recommendation_is_not_a_lead(self):
         samples = [
             ('这个网站我愿意称之为本年度最伟大的发明！！','#代码 #python #程序员 #免费学习资源网站 #网站推荐'),
