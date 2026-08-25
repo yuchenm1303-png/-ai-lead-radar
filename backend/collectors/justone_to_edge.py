@@ -18,7 +18,6 @@ if str(BACKEND_DIR) not in sys.path:
 from app.connectors.justone import JustOneConnector, JustOneError  # noqa: E402
 from app.query_engine import choose_queries  # noqa: E402
 
-
 DEFAULT_API_BASE = "https://nfzkphjbelyltrzgkdwt.supabase.co/functions/v1/lead-radar-collector"
 OIDC_AUDIENCE = "lead-radar-collector"
 
@@ -65,17 +64,23 @@ def _item(raw) -> dict[str, Any]:
     }
 
 
-def post_to_edge(api_base: str, oidc_token: str, body: dict[str, Any], timeout: int = 60) -> dict[str, Any]:
+def post_oidc_json(
+    api_base: str,
+    oidc_token: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    timeout: int = 60,
+) -> dict[str, Any]:
     request = Request(
-        f"{api_base.rstrip('/')}/api/v1/ingest/source",
+        f"{api_base.rstrip('/')}{path}",
         method="POST",
         headers={
             "Authorization": f"Bearer {oidc_token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "AI-Lead-Radar-Collector/1.0",
+            "User-Agent": "AI-Lead-Radar-Collector/1.1",
         },
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        data=json.dumps(body or {}, ensure_ascii=False).encode("utf-8"),
     )
     try:
         with urlopen(request, timeout=timeout) as response:
@@ -98,13 +103,15 @@ def run(
     dry_run: bool = False,
     timeout: int = 60,
     now: datetime | None = None,
+    oidc_token: str | None = None,
+    scan_request_id: int | None = None,
 ) -> dict[str, Any]:
     started = now or utc_now()
-    connector = JustOneConnector()
     specs = choose_queries(now=started, count=max_queries, override=query_override)
     if not specs:
         raise RuntimeError("No queries selected")
 
+    connector = JustOneConnector()
     unique: dict[str, Any] = {}
     query_stats: list[dict[str, Any]] = []
     for spec in specs:
@@ -125,13 +132,15 @@ def run(
         )
 
     items = [_item(raw) for raw in unique.values()]
-    body = {
+    body: dict[str, Any] = {
         "connector": connector.name,
         "started_at": started.isoformat(),
         "scanned": sum(int(stat["raw_count"]) for stat in query_stats),
         "queries": query_stats,
         "items": items,
     }
+    if scan_request_id:
+        body["scan_request_id"] = int(scan_request_id)
 
     summary: dict[str, Any] = {
         "ok": True,
@@ -142,14 +151,68 @@ def run(
         "candidate_count": len(items),
         "max_age_minutes": max_age_minutes,
     }
+    if scan_request_id:
+        summary["scan_request_id"] = int(scan_request_id)
     if dry_run:
         summary["sample_titles"] = [item["title"] for item in items[:5]]
         return summary
 
+    token = oidc_token or get_github_oidc_token()
+    api_base = os.getenv("LEAD_RADAR_API_BASE", DEFAULT_API_BASE).strip() or DEFAULT_API_BASE
+    summary["ingest"] = post_oidc_json(api_base, token, "/api/v1/ingest/source", body, timeout=timeout)
+    return summary
+
+
+def run_from_queue(*, max_age_minutes: int = 1440, timeout: int = 60) -> dict[str, Any]:
     oidc_token = get_github_oidc_token()
     api_base = os.getenv("LEAD_RADAR_API_BASE", DEFAULT_API_BASE).strip() or DEFAULT_API_BASE
-    summary["ingest"] = post_to_edge(api_base, oidc_token, body, timeout=timeout)
-    return summary
+    claim = post_oidc_json(
+        api_base,
+        oidc_token,
+        "/api/v1/scan/claim",
+        {"run_id": os.getenv("GITHUB_RUN_ID", "")},
+        timeout=timeout,
+    )
+    if not claim.get("claimed"):
+        return {
+            "ok": True,
+            "queue_empty": True,
+            "provider_called": False,
+            "message": "No queued web scan request; Just One was not called.",
+        }
+
+    request_info = claim.get("request") if isinstance(claim.get("request"), dict) else {}
+    request_id = int(request_info.get("id") or 0)
+    if request_id <= 0:
+        raise RuntimeError("Collector queue returned an invalid request id")
+    query_override = str(request_info.get("query_override") or "").strip() or None
+    max_queries = max(1, min(3, int(request_info.get("max_queries") or 1)))
+
+    try:
+        result = run(
+            query_override=query_override,
+            max_queries=max_queries,
+            max_age_minutes=max_age_minutes,
+            dry_run=False,
+            timeout=timeout,
+            oidc_token=oidc_token,
+            scan_request_id=request_id,
+        )
+        result["queue_empty"] = False
+        result["provider_called"] = True
+        return result
+    except Exception as exc:
+        try:
+            post_oidc_json(
+                api_base,
+                oidc_token,
+                "/api/v1/scan/fail",
+                {"scan_request_id": request_id, "error": f"{type(exc).__name__}: {exc}"[:700]},
+                timeout=min(timeout, 30),
+            )
+        except Exception as report_exc:
+            print(f"warning: failed to report queue error: {report_exc}", file=sys.stderr)
+        raise
 
 
 def main() -> int:
@@ -159,19 +222,28 @@ def main() -> int:
     parser.add_argument("--max-age-minutes", type=int, default=int(os.getenv("JUSTONE_MAX_AGE_MINUTES", "1440")))
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--from-queue", action="store_true", help="Claim at most one queued web scan request; no provider call when queue is empty")
     parser.add_argument("--output", default="backend/collectors/output/last-run.json")
     args = parser.parse_args()
 
     try:
-        result = run(
-            query_override=args.query,
-            max_queries=max(1, min(6, args.max_queries)),
-            max_age_minutes=max(30, min(10080, args.max_age_minutes)),
-            dry_run=args.dry_run,
-            timeout=max(10, min(180, args.timeout)),
-        )
+        timeout = max(10, min(180, args.timeout))
+        max_age_minutes = max(30, min(10080, args.max_age_minutes))
+        if args.from_queue:
+            result = run_from_queue(max_age_minutes=max_age_minutes, timeout=timeout)
+        else:
+            result = run(
+                query_override=args.query,
+                max_queries=max(1, min(6, args.max_queries)),
+                max_age_minutes=max_age_minutes,
+                dry_run=args.dry_run,
+                timeout=timeout,
+            )
         exit_code = 0
-    except (JustOneError, RuntimeError, ValueError) as exc:
+    except (JustOneError, RuntimeError, ValueError, HTTPError, URLError) as exc:
+        result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:700]}
+        exit_code = 1
+    except Exception as exc:
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:700]}
         exit_code = 1
 
