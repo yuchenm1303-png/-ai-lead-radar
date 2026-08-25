@@ -2,7 +2,7 @@ name: Lead Radar Collector
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       query:
@@ -35,9 +35,6 @@ concurrency:
 
 jobs:
   collect:
-    # Scheduled collection is OFF until repository variable JUSTONE_COLLECTOR_ENABLED=true.
-    # Manual runs remain available for controlled production testing.
-    if: ${{ github.event_name == 'workflow_dispatch' || vars.JUSTONE_COLLECTOR_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -51,21 +48,27 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Validate collector secret
+      - name: Process queued web scan
+        if: ${{ github.event_name == 'schedule' }}
+        run: python backend/collectors/justone_to_edge.py --from-queue
+
+      - name: Validate collector secret for manual run
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           if [ -z "$JUSTONE_API_TOKEN" ]; then
             echo "Missing repository secret: JUSTONE_API_TOKEN"
             exit 2
           fi
 
-      - name: Collect fresh Xiaohongshu candidates
+      - name: Run controlled manual collector
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
         run: |
-          ARGS=(--max-queries "${{ github.event_name == 'workflow_dispatch' && inputs.max_queries || '1' }}")
-          if [ -n "${{ github.event_name == 'workflow_dispatch' && inputs.query || '' }}" ]; then
-            ARGS+=(--query "${{ github.event_name == 'workflow_dispatch' && inputs.query || '' }}")
+          ARGS=(--max-queries "${{ inputs.max_queries }}")
+          if [ -n "${{ inputs.query }}" ]; then
+            ARGS+=(--query "${{ inputs.query }}")
           fi
-          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}" = "true" ]; then
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
             ARGS+=(--dry-run)
           fi
           python backend/collectors/justone_to_edge.py "${ARGS[@]}"
