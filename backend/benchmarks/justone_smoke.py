@@ -10,7 +10,10 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from source_benchmark import extract_candidates
+try:
+    from .source_benchmark import extract_candidates
+except ImportError:  # direct script execution from backend/benchmarks
+    from source_benchmark import extract_candidates
 
 
 _SENSITIVE_HINTS = ("token", "authorization", "cookie", "secret", "password", "credential")
