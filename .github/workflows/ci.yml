@@ -43,9 +43,10 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
-      # New collector is strict-checked. The older lead-radar-api is legacy JS-style TS
+      # New Edge functions are strict-checked. The older lead-radar-api is legacy JS-style TS
       # and remains compile-validated by Supabase deployment rather than retrofitted here.
       - run: deno check supabase/functions/lead-radar-collector/index.ts
+      - run: deno check supabase/functions/lead-radar-scan/index.ts
 
   browser-helper:
     runs-on: ubuntu-latest
