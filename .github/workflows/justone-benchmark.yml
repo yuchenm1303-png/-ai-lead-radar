@@ -48,7 +48,7 @@ jobs:
         if: ${{ inputs.mode == 'dedicated-smoke' }}
         run: |
           python backend/benchmarks/justone_smoke.py \
-            --keyword "找人做小程序" \
+            --keyword "小程序" \
             --output-dir backend/benchmarks/output
 
       - name: Run dedicated Note Search V4 quick benchmark (5 requests)
