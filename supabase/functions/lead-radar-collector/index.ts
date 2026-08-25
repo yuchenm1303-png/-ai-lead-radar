@@ -46,16 +46,12 @@ function b64urlBytes(value: string): Uint8Array<ArrayBuffer> {
   while (base64.length % 4) base64 += "=";
   const binary = atob(base64);
   const bytes = new Uint8Array(new ArrayBuffer(binary.length));
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   return bytes;
 }
 
 function decodeJsonPart(value: string): Record<string, unknown> {
-  const bytes = b64urlBytes(value);
-  const text = new TextDecoder().decode(bytes);
-  const parsed = JSON.parse(text);
+  const parsed = JSON.parse(new TextDecoder().decode(b64urlBytes(value)));
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid JWT object");
   return parsed as Record<string, unknown>;
 }
@@ -108,7 +104,6 @@ async function verifyGithubOidc(req: Request) {
   if (claims.repository !== EXPECTED_REPOSITORY) throw new Error("unexpected GitHub repository");
   if (claims.ref !== EXPECTED_REF) throw new Error("collector must run from main");
   if (claims.workflow_ref !== EXPECTED_WORKFLOW_REF) throw new Error("unexpected collector workflow");
-
   return claims;
 }
 
@@ -137,24 +132,72 @@ async function recordRun(payload: Record<string, unknown>) {
   }
 }
 
+async function updateScanRequest(id: number, status: "success" | "failed", result: Record<string, unknown>, errorText: string | null = null) {
+  await rest(`lead_radar_scan_requests?id=eq.${id}`, {
+    method: "PATCH",
+    headers: { Prefer: "return=minimal" },
+    body: JSON.stringify({
+      status,
+      finished_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      result,
+      error_text: errorText,
+    }),
+  });
+}
+
+async function claimScanRequest(claims: Record<string, unknown>) {
+  const rows = await rest("rpc/lead_radar_claim_scan_request", {
+    method: "POST",
+    body: JSON.stringify({ p_run_id: String(claims.run_id || "").slice(0, 120) }),
+  });
+  const row = Array.isArray(rows) ? rows[0] : null;
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    query_override: row.query_override ? String(row.query_override).slice(0, 120) : null,
+    max_queries: Math.max(1, Math.min(3, Number(row.max_queries || 1))),
+    requested_at: row.requested_at || null,
+  };
+}
+
 Deno.serve(async (req: Request) => {
   const startedWall = Date.now();
   let auditStarted = new Date().toISOString();
   let connector = "justone-xiaohongshu-v4";
   let scanned = 0;
   let queries: ReturnType<typeof cleanQueries> = [];
+  let scanRequestId: number | null = null;
 
   try {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^.*\/lead-radar-collector/, "") || "/";
     if (req.method === "GET" && path === "/health") {
-      return json({ ok: true, service: "lead-radar-collector", auth: "github-actions-oidc" });
+      return json({ ok: true, service: "lead-radar-collector", auth: "github-actions-oidc", queue: true });
     }
+
+    if (req.method === "POST" && path === "/api/v1/scan/claim") {
+      const claims = await verifyGithubOidc(req);
+      const claimed = await claimScanRequest(claims);
+      return json(claimed ? { ok: true, claimed: true, request: claimed } : { ok: true, claimed: false });
+    }
+
+    if (req.method === "POST" && path === "/api/v1/scan/fail") {
+      await verifyGithubOidc(req);
+      const body = await req.json();
+      const id = Number(body?.scan_request_id || 0);
+      if (!Number.isInteger(id) || id <= 0) return json({ detail: "scan_request_id required" }, 422);
+      const message = String(body?.error || "collector failed").slice(0, 700);
+      await updateScanRequest(id, "failed", { failed_by: "collector" }, message);
+      return json({ ok: true });
+    }
+
     if (req.method !== "POST" || path !== "/api/v1/ingest/source") return json({ detail: "Not found" }, 404);
 
     const claims = await verifyGithubOidc(req);
     const body = await req.json();
     connector = String(body?.connector || connector).slice(0, 120);
+    scanRequestId = Number.isInteger(Number(body?.scan_request_id)) && Number(body.scan_request_id) > 0 ? Number(body.scan_request_id) : null;
     auditStarted = Number.isFinite(new Date(body?.started_at || "").getTime())
       ? new Date(body.started_at).toISOString()
       : new Date().toISOString();
@@ -189,30 +232,7 @@ Deno.serve(async (req: Request) => {
     }
 
     const finished = new Date().toISOString();
-    await recordRun({
-      connector,
-      started_at: auditStarted,
-      finished_at: finished,
-      scanned: scanned || items.length,
-      stored: Number(ingest?.stored || 0),
-      filtered: Number(ingest?.filtered || 0),
-      high_intent: highIntent,
-      status: "success",
-      error_text: null,
-      details: {
-        queries,
-        received: Number(ingest?.received || items.length),
-        duplicates: Number(ingest?.duplicates || 0),
-        notified: Number(ingest?.notified || 0),
-        repository: claims.repository,
-        workflow_ref: claims.workflow_ref,
-        run_id: claims.run_id || null,
-        duration_ms: Date.now() - startedWall,
-      },
-    });
-
-    return json({
-      ok: true,
+    const result = {
       connector,
       scanned: scanned || items.length,
       stored: Number(ingest?.stored || 0),
@@ -221,11 +241,42 @@ Deno.serve(async (req: Request) => {
       notified: Number(ingest?.notified || 0),
       high_intent: highIntent,
       lead_ids: leadIds,
+      queries,
       last_scan_at: finished,
+    };
+
+    await recordRun({
+      connector,
+      started_at: auditStarted,
+      finished_at: finished,
+      scanned: result.scanned,
+      stored: result.stored,
+      filtered: result.filtered,
+      high_intent: highIntent,
+      status: "success",
+      error_text: null,
+      details: {
+        queries,
+        received: Number(ingest?.received || items.length),
+        duplicates: result.duplicates,
+        notified: result.notified,
+        repository: claims.repository,
+        workflow_ref: claims.workflow_ref,
+        run_id: claims.run_id || null,
+        scan_request_id: scanRequestId,
+        duration_ms: Date.now() - startedWall,
+      },
     });
+
+    if (scanRequestId) await updateScanRequest(scanRequestId, "success", result, null);
+    return json({ ok: true, ...result });
   } catch (error) {
     const message = String(error).slice(0, 700);
     console.error(message);
+    if (scanRequestId) {
+      try { await updateScanRequest(scanRequestId, "failed", { failed_by: "ingest" }, message); }
+      catch (updateError) { console.warn("scan request failure update failed", String(updateError)); }
+    }
     await recordRun({
       connector,
       started_at: auditStarted,
@@ -236,7 +287,7 @@ Deno.serve(async (req: Request) => {
       high_intent: 0,
       status: "failed",
       error_text: message,
-      details: { queries, duration_ms: Date.now() - startedWall },
+      details: { queries, scan_request_id: scanRequestId, duration_ms: Date.now() - startedWall },
     });
     const authFailure = /OIDC|bearer|JWT|repository|workflow|audience|issuer|signature|expired|main/i.test(message);
     return json({ detail: authFailure ? "Collector authentication failed" : "Collector ingest failed" }, authFailure ? 401 : 500);
