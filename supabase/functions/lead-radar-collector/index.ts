@@ -158,20 +158,22 @@ Deno.serve(async (req: Request) => {
     queries = cleanQueries(body?.queries);
     const items = Array.isArray(body?.items) ? body.items.slice(0, 200) : [];
 
-    const ingestResponse = await fetch(`${SB_URL}/functions/v1/lead-radar-api/api/v1/ingest/manual`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Origin: "https://smirel.com",
-      },
-      body: JSON.stringify({ items }),
-    });
-    const ingestText = await ingestResponse.text();
-    let ingest: any = null;
-    try { ingest = ingestText ? JSON.parse(ingestText) : {}; }
-    catch { ingest = { detail: ingestText.slice(0, 300) }; }
-    if (!ingestResponse.ok) throw new Error(`lead-radar-api ${ingestResponse.status}: ${ingestText.slice(0, 300)}`);
+    let ingest: any = { received: 0, stored: 0, filtered: 0, duplicates: 0, notified: 0, lead_ids: [] };
+    if (items.length) {
+      const ingestResponse = await fetch(`${SB_URL}/functions/v1/lead-radar-api/api/v1/ingest/manual`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Origin: "https://smirel.com",
+        },
+        body: JSON.stringify({ items }),
+      });
+      const ingestText = await ingestResponse.text();
+      try { ingest = ingestText ? JSON.parse(ingestText) : {}; }
+      catch { ingest = { detail: ingestText.slice(0, 300) }; }
+      if (!ingestResponse.ok) throw new Error(`lead-radar-api ${ingestResponse.status}: ${ingestText.slice(0, 300)}`);
+    }
 
     const leadIds = Array.isArray(ingest?.lead_ids)
       ? ingest.lead_ids.filter((id: unknown) => Number.isInteger(Number(id))).map((id: unknown) => Number(id)).slice(0, 200)
