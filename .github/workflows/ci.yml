@@ -33,8 +33,19 @@ jobs:
           cache-dependency-path: backend/requirements.txt
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt
-      - run: python -m compileall app benchmarks
+      - run: python -m compileall app benchmarks collectors
       - run: python -m unittest discover -s tests -v
+
+  edge-functions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      # New collector is strict-checked. The older lead-radar-api is legacy JS-style TS
+      # and remains compile-validated by Supabase deployment rather than retrofitted here.
+      - run: deno check supabase/functions/lead-radar-collector/index.ts
 
   browser-helper:
     runs-on: ubuntu-latest

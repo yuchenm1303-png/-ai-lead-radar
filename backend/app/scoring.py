@@ -17,10 +17,15 @@ INTENT_WORDS = {
 }
 NEGATIVE_WORDS = ['教程','怎么学','学习路线','推荐课程','课程推荐','想学','零基础','入门','找工作','面试','源码分享','难吗']
 PAYMENT_WORDS = ['有偿','预算','多少钱','报价']
+SERVICE_OBJECT = r'(?:小程序|微信小程序|网站|网页|官网|管理系统|系统|ai智能体|智能体|自动化|软件开发|独立站|h5|python|爬虫|脚本)'
 DIRECT_BUYER_PATTERNS = [
     re.compile(r'(?:寻找|寻求|找|求).{0,12}(?:开发|程序员|开发者|技术团队|开发团队)'),
     re.compile(r'(?:有没有|有没).{0,10}(?:会|能).{0,8}(?:做|开发|写|搭建)'),
-    re.compile(r'(?:需要|想要|准备|打算|想).{0,10}(?:做|开发|搭建|制作|写).{0,16}(?:小程序|网站|网页|系统|ai|智能体|脚本|自动化|独立站|h5)'),
+    re.compile(rf'(?:需要|想要|准备|打算|想).{{0,10}}(?:做|开发|搭建|制作|写).{{0,16}}{SERVICE_OBJECT}'),
+    # Short Xiaohongshu demand posts often omit verbs such as “开发/做”.
+    # Example: “急！需要 icp+edi，小程序，知识付费，在线交易”.
+    re.compile(rf'(?:急需|需要|求|想要|有偿|外包|预算|报价).{{0,24}}{SERVICE_OBJECT}'),
+    re.compile(rf'{SERVICE_OBJECT}.{{0,20}}(?:有偿|外包|预算|报价|找人|求助|急需|谁会|谁能)'),
 ]
 
 @dataclass(frozen=True)

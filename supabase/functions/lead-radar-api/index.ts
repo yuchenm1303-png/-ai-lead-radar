@@ -29,7 +29,9 @@ const NEGATIVE = ["教程", "怎么学", "学习路线", "推荐课程", "课程
 const DIRECT_BUYER_PATTERNS = [
   /(?:寻找|寻求|找|求).{0,12}(?:开发|程序员|开发者|技术团队|开发团队)/,
   /(?:有没有|有没).{0,10}(?:会|能).{0,8}(?:做|开发|写|搭建)/,
-  /(?:需要|想要|准备|打算|想).{0,10}(?:做|开发|搭建|制作|写).{0,16}(?:小程序|网站|网页|系统|ai|智能体|脚本|自动化|独立站|h5)/
+  /(?:需要|想要|准备|打算|想).{0,10}(?:做|开发|搭建|制作|写).{0,16}(?:小程序|网站|网页|系统|ai|智能体|脚本|自动化|独立站|h5)/,
+  /(?:急需|需要|求|想要|有偿|外包|预算|报价).{0,24}(?:小程序|微信小程序|网站|网页|官网|管理系统|系统|ai智能体|智能体|自动化|软件开发|独立站|h5|python|爬虫|脚本)/,
+  /(?:小程序|微信小程序|网站|网页|官网|管理系统|系统|ai智能体|智能体|自动化|软件开发|独立站|h5|python|爬虫|脚本).{0,20}(?:有偿|外包|预算|报价|找人|求助|急需|谁会|谁能)/
 ];
 
 function cors(origin = "") {
@@ -147,7 +149,7 @@ async function semanticClassification(item, base) {
   const payload = {
     model: OPENAI_MODEL,
     store: false,
-    instructions: "你是开发外包需求分类器。高精度优先。像‘寻找AI智能体开发团队或个人’、‘找人做网站’、‘有没有会做小程序的’这类明确寻找开发方的表达，即使未公开预算，也属于强购买/外包意图。学习教程、课程推荐、泛讨论、求职招聘、纯技术问答必须判为 false。不要提取或推断个人敏感信息。",
+    instructions: "你是开发外包需求分类器。高精度优先。像‘寻找AI智能体开发团队或个人’、‘找人做网站’、‘有没有会做小程序的’、‘急！需要icp+edi，小程序，知识付费，在线交易’这类明确寻找开发方或提出待实现产品需求的表达，即使未公开预算，也属于强购买/外包意图。学习教程、课程推荐、泛讨论、求职招聘、服务商自我宣传、纯技术问答必须判为 false。不要提取或推断个人敏感信息。",
     input: [{ role: "user", content: [{ type: "input_text", text: `请输出符合 schema 的 JSON。\n标题：${item.title}\n正文摘要：${item.excerpt}\n已知预算：${item.budget || "未公开"}` }] }],
     text: { format: { type: "json_schema", name: "lead_classification", strict: true, schema } }
   };
@@ -203,7 +205,7 @@ Deno.serve(async (req) => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^.*\/lead-radar-api/, "") || "/";
     if (method === "GET" && path === "/health") {
-      return json({ ok: true, service: "lead-radar-api", version: "0.5-edge", timestamp: new Date().toISOString(), ai_provider: OPENAI_KEY && OPENAI_MODEL ? "openai" : "rules" }, 200, origin);
+      return json({ ok: true, service: "lead-radar-api", version: "0.6-edge", timestamp: new Date().toISOString(), ai_provider: OPENAI_KEY && OPENAI_MODEL ? "openai" : "rules" }, 200, origin);
     }
     if (method === "GET" && path === "/api/v1/leads") {
       const min = Math.max(0, Math.min(100, Number(url.searchParams.get("min_score") || 0)));
@@ -245,13 +247,12 @@ Deno.serve(async (req) => {
     }
     if (method === "GET" && path === "/api/v1/monitor/status") {
       const runs = await rest("lead_radar_scan_runs?select=*&order=started_at.desc&limit=1");
-      return json({ running: false, mode: "safe-manual-browser-helper", platforms: ["manual", "browser-helper"], last_scan_at: runs?.[0]?.finished_at || null, ai_provider: OPENAI_KEY && OPENAI_MODEL ? "openai" : "rules", notification_enabled: Boolean(FEISHU_WEBHOOK_URL), note: "Safe MVP: import public content you can already view; no anti-bot bypass." }, 200, origin);
+      return json({ running: false, mode: "production-source-collector", platforms: ["justone-xiaohongshu-v4", "manual", "browser-helper"], last_scan_at: runs?.[0]?.finished_at || null, ai_provider: OPENAI_KEY && OPENAI_MODEL ? "openai" : "rules", notification_enabled: Boolean(FEISHU_WEBHOOK_URL), note: "Xiaohongshu source collection is handled by an authenticated GitHub Actions collector; manual/browser-assisted import remains available. No anti-bot bypass." }, 200, origin);
     }
     if (method === "POST" && path === "/api/v1/monitor/scan") {
       if (!ALLOWED.has(origin)) return json({ detail: "Write origin required" }, 403, origin);
       const now = new Date().toISOString();
-      await rest("lead_radar_scan_runs?select=*", { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify({ connector: "manual-browser-helper", started_at: now, finished_at: now, scanned: 0, stored: 0, filtered: 0, high_intent: 0, status: "success" }) });
-      return json({ ok: true, connector: "manual-browser-helper", scanned: 0, stored: 0, filtered: 0, high_intent: 0, last_scan_at: now, note: "No autonomous Xiaohongshu crawler is enabled; capture visible public posts with Browser Helper." }, 200, origin);
+      return json({ ok: true, connector: "justone-xiaohongshu-v4", scanned: 0, stored: 0, filtered: 0, high_intent: 0, last_scan_at: now, note: "Production source collection is schedule-driven to control provider quota; use the collector workflow for a controlled scan." }, 200, origin);
     }
     return json({ detail: "Not found" }, 404, origin);
   } catch (error) {
