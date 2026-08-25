@@ -4,12 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Benchmark size"
+        description: "Benchmark mode"
         required: true
-        default: smoke
+        default: free-smoke
         type: choice
         options:
-          - smoke
+          - free-smoke
+          - dedicated-smoke
           - quick
           - full
 
@@ -35,13 +36,22 @@ jobs:
             exit 2
           fi
 
-      - name: One-call smoke test
+      - name: Free cross-platform Xiaohongshu smoke test (1 request)
+        if: ${{ inputs.mode == 'free-smoke' }}
+        run: |
+          python backend/benchmarks/justone_cross_search_smoke.py \
+            --keyword "寻找开发团队" \
+            --hours 24 \
+            --output-dir backend/benchmarks/output
+
+      - name: Dedicated Note Search V4 smoke test (1 request)
+        if: ${{ inputs.mode == 'dedicated-smoke' }}
         run: |
           python backend/benchmarks/justone_smoke.py \
             --keyword "寻找开发团队" \
             --output-dir backend/benchmarks/output
 
-      - name: Run quick benchmark (5 requests)
+      - name: Run dedicated Note Search V4 quick benchmark (5 requests)
         if: ${{ inputs.mode == 'quick' }}
         run: |
           python backend/benchmarks/source_benchmark.py \
@@ -53,7 +63,7 @@ jobs:
             --keyword "网站开发 有偿" \
             --output-dir backend/benchmarks/output
 
-      - name: Run full benchmark (20 requests)
+      - name: Run dedicated Note Search V4 full benchmark (20 requests)
         if: ${{ inputs.mode == 'full' }}
         run: |
           python backend/benchmarks/source_benchmark.py \
