@@ -2,6 +2,7 @@ import json
 import unittest
 from datetime import timezone
 
+from benchmarks.justone_smoke import _generic_records, _redact
 from benchmarks.source_benchmark import ProbeResult, _parse_datetime, extract_candidates, summarize
 from benchmarks.tikhub_account_status import _safe_error_payload
 
@@ -86,6 +87,40 @@ class SourceBenchmarkTests(unittest.TestCase):
         self.assertIn("required_scope", rendered)
         self.assertNotIn("demo-secret", rendered)
         self.assertNotIn("person@example.com", rendered)
+
+    def test_justone_generic_records_survive_unknown_nested_v4_shape(self):
+        payload = {
+            "code": 0,
+            "data": {
+                "searchFeeds": [
+                    {
+                        "modelType": "note",
+                        "noteCard": {
+                            "id": "6abc1234567890",
+                            "displayTitle": "小程序外包求助",
+                            "publishTime": 1787560000000,
+                            "url": "https://www.xiaohongshu.com/explore/6abc1234567890",
+                        },
+                    }
+                ]
+            },
+        }
+        records = _generic_records(payload)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["note_id"], "6abc1234567890")
+        self.assertIn("小程序", records[0]["title"])
+        self.assertTrue(records[0]["published_at"].endswith("+00:00"))
+        self.assertIn("xiaohongshu.com/explore/", records[0]["url"])
+
+    def test_justone_redacted_response_recursively_removes_credentials(self):
+        payload = {
+            "code": 0,
+            "data": {"token": "secret-token", "nested": {"cookie": "abc", "title": "公开标题"}},
+        }
+        rendered = json.dumps(_redact(payload), ensure_ascii=False)
+        self.assertNotIn("secret-token", rendered)
+        self.assertNotIn('"abc"', rendered)
+        self.assertIn("公开标题", rendered)
 
 
 if __name__ == "__main__":
