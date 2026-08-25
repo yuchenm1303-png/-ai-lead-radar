@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 from source_benchmark import extract_candidates
 
@@ -26,6 +27,7 @@ _SCHEMA_HINTS = (
     "platform",
 )
 _SENSITIVE_HINTS = ("token", "authorization", "cookie", "secret", "password")
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _message(payload: dict[str, Any]) -> str:
@@ -93,7 +95,7 @@ def _schema_probe(payload: dict[str, Any], limit: int = 2) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="One-call free Just One cross-platform Xiaohongshu smoke test.")
-    parser.add_argument("--keyword", default="寻找开发团队")
+    parser.add_argument("--keyword", default="找人做小程序")
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--output-dir", default=str(Path(__file__).resolve().parent / "output"))
@@ -104,7 +106,10 @@ def main() -> int:
         print("Missing JUSTONE_API_TOKEN")
         return 2
 
-    end = datetime.now().astimezone()
+    # Just One's unified-search API accepts naive yyyy-MM-dd HH:mm:ss values.
+    # Generate that window explicitly in Asia/Shanghai so GitHub's UTC runner
+    # cannot silently shift a Xiaohongshu freshness query by eight hours.
+    end = datetime.now(_SHANGHAI_TZ)
     start = end - timedelta(hours=max(1, args.hours))
     params = urlencode(
         {
@@ -153,6 +158,9 @@ def main() -> int:
         "source": "XIAOHONGSHU",
         "keyword": args.keyword,
         "window_hours": args.hours,
+        "window_timezone": "Asia/Shanghai",
+        "window_start": start.isoformat(),
+        "window_end": end.isoformat(),
         "raw_candidates": raw_count,
         "normalized_candidates": len(candidates),
         "newest_age_minutes": round(min(ages), 1) if ages else None,
