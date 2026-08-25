@@ -25,6 +25,14 @@ class MVPTests(unittest.TestCase):
         self.assertGreaterEqual(r.score,85)
         self.assertEqual(r.priority,'high')
         self.assertIn('明确找开发方',r.signals)
+    def test_terse_xhs_need_without_development_verb_reaches_classifier(self):
+        r=score_text(
+            '急！需要icp+edi，小程序，知识付费，在线交易',
+            '其他细节可以沟通',
+            datetime.now(timezone.utc),
+        )
+        self.assertTrue(r.is_lead)
+        self.assertTrue(prefilter_text(r'急！需要icp+edi，小程序，知识付费，在线交易').direct_buyer)
     def test_learning_request_is_filtered_even_with_search_wording(self):
         r=score_text('寻找适合学习AI开发的课程','推荐一下',datetime.now(timezone.utc))
         self.assertFalse(r.is_lead)
