@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -61,7 +61,6 @@ def _schema_probe(payload: dict[str, Any], limit: int = 2) -> dict[str, Any]:
         "data_top_keys": sorted(data.keys())[:80] if isinstance(data, dict) else [],
         "samples": [],
     }
-
     scored: list[tuple[int, dict[str, Any]]] = []
     for node in _walk_dicts(data):
         keys = [str(key) for key in node.keys()]
@@ -73,7 +72,6 @@ def _schema_probe(payload: dict[str, Any], limit: int = 2) -> dict[str, Any]:
         ]
         if relevant:
             scored.append((len(relevant), node))
-
     scored.sort(key=lambda item: item[0], reverse=True)
     for _, node in scored[:limit]:
         selected: dict[str, Any] = {}
@@ -146,6 +144,8 @@ def main() -> int:
         return 1
 
     raw_count, candidates = extract_candidates(payload)
+    now = datetime.now(timezone.utc)
+    ages = [max(0.0, (now - item.published_at).total_seconds() / 60.0) for item in candidates]
     safe = {
         "ok": True,
         "business_code": 0,
@@ -155,7 +155,12 @@ def main() -> int:
         "window_hours": args.hours,
         "raw_candidates": raw_count,
         "normalized_candidates": len(candidates),
+        "newest_age_minutes": round(min(ages), 1) if ages else None,
+        "within_30m": sum(1 for age in ages if age <= 30),
+        "within_2h": sum(1 for age in ages if age <= 120),
+        "within_24h": sum(1 for age in ages if age <= 1440),
         "sample_titles": [item.title for item in candidates[:3]],
+        "sample_urls": [item.url for item in candidates[:3] if item.url],
         "url_coverage": sum(1 for item in candidates if item.url),
     }
     if raw_count and not candidates:
