@@ -12,12 +12,85 @@ from urllib.request import Request, urlopen
 from source_benchmark import extract_candidates
 
 
+_SCHEMA_HINTS = (
+    "id",
+    "title",
+    "content",
+    "desc",
+    "text",
+    "time",
+    "date",
+    "url",
+    "link",
+    "source",
+    "platform",
+)
+_SENSITIVE_HINTS = ("token", "authorization", "cookie", "secret", "password")
+
+
 def _message(payload: dict[str, Any]) -> str:
     for key in ("message", "msg", "message_zh", "error"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()[:240]
     return ""
+
+
+def _walk_dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_dicts(child)
+
+
+def _safe_scalar(value: Any) -> Any:
+    if isinstance(value, str):
+        return value[:120]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return f"<{type(value).__name__}>"
+
+
+def _schema_probe(payload: dict[str, Any], limit: int = 2) -> dict[str, Any]:
+    data = payload.get("data")
+    probe: dict[str, Any] = {
+        "data_type": type(data).__name__,
+        "data_top_keys": sorted(data.keys())[:80] if isinstance(data, dict) else [],
+        "samples": [],
+    }
+
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for node in _walk_dicts(data):
+        keys = [str(key) for key in node.keys()]
+        relevant = [
+            key
+            for key in keys
+            if any(hint in key.lower() for hint in _SCHEMA_HINTS)
+            and not any(secret in key.lower() for secret in _SENSITIVE_HINTS)
+        ]
+        if relevant:
+            scored.append((len(relevant), node))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    for _, node in scored[:limit]:
+        selected: dict[str, Any] = {}
+        for key, value in node.items():
+            key_text = str(key)
+            lowered = key_text.lower()
+            if any(secret in lowered for secret in _SENSITIVE_HINTS):
+                continue
+            if any(hint in lowered for hint in _SCHEMA_HINTS):
+                selected[key_text] = _safe_scalar(value)
+        probe["samples"].append(
+            {
+                "keys": sorted(str(key) for key in node.keys())[:80],
+                "selected": selected,
+            }
+        )
+    return probe
 
 
 def main() -> int:
@@ -85,6 +158,9 @@ def main() -> int:
         "sample_titles": [item.title for item in candidates[:3]],
         "url_coverage": sum(1 for item in candidates if item.url),
     }
+    if raw_count and not candidates:
+        safe["schema_probe"] = _schema_probe(payload)
+
     (output_dir / "justone-cross-search-smoke.json").write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
     print("Just One free cross-platform Xiaohongshu smoke result:")
     print(json.dumps(safe, ensure_ascii=False, indent=2))
