@@ -42,7 +42,7 @@ jobs:
     timeout-minutes: 10
     env:
       JUSTONE_API_TOKEN: ${{ secrets.JUSTONE_API_TOKEN }}
-      LEAD_RADAR_API_BASE: https://nfzkphjbelyltrzgkdwt.supabase.co/functions/v1/lead-radar-api
+      LEAD_RADAR_API_BASE: https://nfzkphjbelyltrzgkdwt.supabase.co/functions/v1/lead-radar-collector
       JUSTONE_MAX_AGE_MINUTES: "1440"
     steps:
       - uses: actions/checkout@v4
