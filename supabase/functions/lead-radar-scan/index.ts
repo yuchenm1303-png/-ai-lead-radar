@@ -64,25 +64,38 @@ async function latestRequests(limit = 10) {
   return await rest(`lead_radar_scan_requests?select=id,status,requested_at,started_at,finished_at,result,error_text&order=requested_at.desc&limit=${limit}`);
 }
 
+function requestWindow(requests: any[]) {
+  const now = Date.now();
+  const recent = requests.filter((row: any) => {
+    const ts = new Date(row?.requested_at || 0).getTime();
+    return Number.isFinite(ts) && ts >= now - 60 * 60 * 1000 && String(row?.status || "") !== "cancelled";
+  });
+  const latest = recent[0] || null;
+  const latestAt = latest ? new Date(latest.requested_at || 0).getTime() : 0;
+  const cooldownMs = latestAt ? Math.max(0, MIN_REQUEST_GAP_MS - (now - latestAt)) : 0;
+  return {
+    recent,
+    recentCount: recent.length,
+    cooldownSeconds: Math.ceil(cooldownMs / 1000),
+    nextAvailableAt: cooldownMs > 0 ? new Date(now + cooldownMs).toISOString() : null,
+  };
+}
+
 async function statusPayload() {
-  const [runs, requests] = await Promise.all([
+  const [runs, requestRows] = await Promise.all([
     rest("lead_radar_scan_runs?select=id,connector,started_at,finished_at,scanned,stored,filtered,high_intent,status,error_text,details&order=started_at.desc&limit=1"),
     latestRequests(20),
   ]);
+  const requests = Array.isArray(requestRows) ? requestRows : [];
   const latestRun = Array.isArray(runs) ? runs[0] : null;
-  const latestRequest = Array.isArray(requests) ? requests[0] : null;
-  const active = Array.isArray(requests) ? requests.find((row: any) => ["queued", "running"].includes(String(row?.status || ""))) : null;
-  const hourAgo = Date.now() - 60 * 60 * 1000;
-  const recentCount = Array.isArray(requests)
-    ? requests.filter((row: any) => {
-        const ts = new Date(row?.requested_at || 0).getTime();
-        return Number.isFinite(ts) && ts >= hourAgo && String(row?.status || "") !== "cancelled";
-      }).length
-    : 0;
+  const latestRequest = requests[0] || null;
+  const active = requests.find((row: any) => ["queued", "running"].includes(String(row?.status || ""))) || null;
+  const windowState = requestWindow(requests);
+  const queueAvailable = !active && windowState.recentCount < MAX_REQUESTS_PER_HOUR && windowState.cooldownSeconds === 0;
   return {
     ok: true,
     service: "lead-radar-scan",
-    version: "0.1-queue",
+    version: "0.2-queue-recovery",
     mode: "web-queued-github-worker",
     platform: "小红书 · Just One V4",
     worker_interval_minutes: 5,
@@ -99,8 +112,10 @@ async function statusPayload() {
       high_intent: Number(latestRun.high_intent || 0),
       connector: latestRun.connector || "justone-xiaohongshu-v4",
     } : null,
-    queue_available: !active && recentCount < MAX_REQUESTS_PER_HOUR,
-    requests_last_hour: recentCount,
+    queue_available: queueAvailable,
+    cooldown_seconds: windowState.cooldownSeconds,
+    next_available_at: windowState.nextAvailableAt,
+    requests_last_hour: windowState.recentCount,
     request_limit_per_hour: MAX_REQUESTS_PER_HOUR,
   };
 }
@@ -121,27 +136,19 @@ Deno.serve(async (req: Request) => {
 
     if (method === "POST" && path === "/api/v1/request") {
       if (!ALLOWED.has(origin)) return json({ detail: "Write origin required" }, 403, origin);
-      const requests = await latestRequests(20);
-      const active = Array.isArray(requests) ? requests.find((row: any) => ["queued", "running"].includes(String(row?.status || ""))) : null;
+      const requestRows = await latestRequests(20);
+      const requests = Array.isArray(requestRows) ? requestRows : [];
+      const active = requests.find((row: any) => ["queued", "running"].includes(String(row?.status || ""))) || null;
       if (active) {
         return json({ ok: true, accepted: true, existing: true, request: publicRequest(active), eta_minutes: 5 }, 200, origin);
       }
 
-      const now = Date.now();
-      const recent = Array.isArray(requests)
-        ? requests.filter((row: any) => {
-            const ts = new Date(row?.requested_at || 0).getTime();
-            return Number.isFinite(ts) && ts >= now - 60 * 60 * 1000 && String(row?.status || "") !== "cancelled";
-          })
-        : [];
-      if (recent.length >= MAX_REQUESTS_PER_HOUR) {
+      const windowState = requestWindow(requests);
+      if (windowState.recentCount >= MAX_REQUESTS_PER_HOUR) {
         return json({ detail: "扫描额度保护已触发：每小时最多发起 3 次扫描。", retry_after_seconds: 1200 }, 429, origin);
       }
-      const latest = recent[0];
-      const latestAt = latest ? new Date(latest.requested_at || 0).getTime() : 0;
-      if (latestAt && now - latestAt < MIN_REQUEST_GAP_MS) {
-        const retry = Math.max(1, Math.ceil((MIN_REQUEST_GAP_MS - (now - latestAt)) / 1000));
-        return json({ detail: "刚刚已经发起过扫描，请稍后再试。", retry_after_seconds: retry }, 429, origin);
+      if (windowState.cooldownSeconds > 0) {
+        return json({ detail: "刚刚已经发起过扫描，请稍后再试。", retry_after_seconds: windowState.cooldownSeconds }, 429, origin);
       }
 
       let rows;
@@ -159,8 +166,9 @@ Deno.serve(async (req: Request) => {
           }),
         });
       } catch (error) {
-        const refreshed = await latestRequests(5);
-        const raced = Array.isArray(refreshed) ? refreshed.find((row: any) => ["queued", "running"].includes(String(row?.status || ""))) : null;
+        const refreshedRows = await latestRequests(5);
+        const refreshed = Array.isArray(refreshedRows) ? refreshedRows : [];
+        const raced = refreshed.find((row: any) => ["queued", "running"].includes(String(row?.status || ""))) || null;
         if (raced) return json({ ok: true, accepted: true, existing: true, request: publicRequest(raced), eta_minutes: 5 }, 200, origin);
         throw error;
       }
