@@ -16,10 +16,10 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.connectors.justone import JustOneConnector, JustOneError  # noqa: E402
-from app.query_engine import QuerySpec, choose_queries  # noqa: E402
+from app.query_engine import choose_queries  # noqa: E402
 
 
-DEFAULT_API_BASE = "https://nfzkphjbelyltrzgkdwt.supabase.co/functions/v1/lead-radar-api"
+DEFAULT_API_BASE = "https://nfzkphjbelyltrzgkdwt.supabase.co/functions/v1/lead-radar-collector"
 OIDC_AUDIENCE = "lead-radar-collector"
 
 
