@@ -6,13 +6,11 @@ on:
       mode:
         description: "Benchmark mode"
         required: true
-        default: free-smoke
+        default: final-verdict
         type: choice
         options:
+          - final-verdict
           - free-smoke
-          - dedicated-smoke
-          - quick
-          - full
 
 permissions:
   contents: read
@@ -36,38 +34,19 @@ jobs:
             exit 2
           fi
 
-      - name: Free cross-platform Xiaohongshu smoke test (1 request)
-        if: ${{ inputs.mode == 'free-smoke' }}
-        run: |
-          python backend/benchmarks/justone_cross_search_smoke.py \
-            --keyword "找人做小程序" \
-            --hours 24 \
-            --output-dir backend/benchmarks/output
-
-      - name: Dedicated Note Search V4 smoke test (1 request)
-        if: ${{ inputs.mode == 'dedicated-smoke' }}
+      - name: FINAL V4 freshness verdict (1 request only)
+        if: ${{ inputs.mode == 'final-verdict' }}
         run: |
           python backend/benchmarks/justone_smoke.py \
             --keyword "小程序" \
             --output-dir backend/benchmarks/output
 
-      - name: Run dedicated Note Search V4 quick benchmark (5 requests)
-        if: ${{ inputs.mode == 'quick' }}
+      - name: Free cached cross-platform smoke test (1 request)
+        if: ${{ inputs.mode == 'free-smoke' }}
         run: |
-          python backend/benchmarks/source_benchmark.py \
-            --provider justone \
+          python backend/benchmarks/justone_cross_search_smoke.py \
             --keyword "找人做小程序" \
-            --keyword "有没有会做小程序的" \
-            --keyword "找人做网站" \
-            --keyword "网站开发 有偿" \
-            --keyword "软件开发 外包" \
-            --output-dir backend/benchmarks/output
-
-      - name: Run dedicated Note Search V4 full benchmark (20 requests)
-        if: ${{ inputs.mode == 'full' }}
-        run: |
-          python backend/benchmarks/source_benchmark.py \
-            --provider justone \
+            --hours 24 \
             --output-dir backend/benchmarks/output
 
       - name: Upload benchmark report
