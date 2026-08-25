@@ -11,10 +11,16 @@ SERVICE_KEYWORDS = {
 }
 INTENT_WORDS = {
     '有偿':24,'预算':18,'多少钱':18,'报价':18,'找人':22,'寻找':26,'寻求':24,
-    '求开发':26,'找开发':26,'开发团队':26,'开发个人':22,'程序员':18,'开发者':16,
-    '帮忙做':22,'需要开发':24,'需要做':16,'急':16,'外包':24,'公司':8,'项目':8,
-    '可以聊':8,'有没有人会':14,'求助':12,'找谁':15,'想做':16,'想搞':16,'帮忙写':20,'有没有会':14,
+    '求开发':26,'找开发':26,'开发团队':26,'开发个人':22,'帮忙做':22,'需要开发':24,
+    '需要做':16,'急':16,'急需':20,'外包':24,'可以聊':8,'有没有人会':14,'求助':12,
+    '找谁':15,'想做':16,'想搞':16,'帮忙写':20,'有没有会':14,'谁能做':24,'谁会做':22,
+    '有人能做':22,'有人接':20,'能接吗':20,'接单吗':18,
 }
+BUYER_ACTION_WORDS = [
+    '有偿','找人','寻找','寻求','求开发','找开发','开发团队','开发个人','帮忙做','需要开发',
+    '需要做','急需','外包','有没有人会','求助','找谁','想做','想搞','帮忙写','有没有会',
+    '谁能做','谁会做','有人能做','有人接','能接吗','接单吗',
+]
 NEGATIVE_WORDS = ['教程','怎么学','学习路线','推荐课程','课程推荐','想学','零基础','入门','找工作','面试','源码分享','难吗']
 PAYMENT_WORDS = ['有偿','预算','多少钱','报价']
 SERVICE_OBJECT = r'(?:小程序|微信小程序|网站|网页|官网|管理系统|系统|ai智能体|智能体|自动化|软件开发|独立站|h5|python|爬虫|脚本)'
@@ -22,10 +28,16 @@ DIRECT_BUYER_PATTERNS = [
     re.compile(r'(?:寻找|寻求|找|求).{0,12}(?:开发|程序员|开发者|技术团队|开发团队)'),
     re.compile(r'(?:有没有|有没).{0,10}(?:会|能).{0,8}(?:做|开发|写|搭建)'),
     re.compile(rf'(?:需要|想要|准备|打算|想).{{0,10}}(?:做|开发|搭建|制作|写).{{0,16}}{SERVICE_OBJECT}'),
-    # Short Xiaohongshu demand posts often omit verbs such as “开发/做”.
-    # Example: “急！需要 icp+edi，小程序，知识付费，在线交易”.
-    re.compile(rf'(?:急需|需要|求|想要|有偿|外包|预算|报价).{{0,24}}{SERVICE_OBJECT}'),
-    re.compile(rf'{SERVICE_OBJECT}.{{0,20}}(?:有偿|外包|预算|报价|找人|求助|急需|谁会|谁能)'),
+    re.compile(rf'(?:急需|需要|求|想要|有偿|外包).{{0,24}}{SERVICE_OBJECT}'),
+    re.compile(rf'{SERVICE_OBJECT}.{{0,20}}(?:有偿|外包|找人|求助|急需|谁会|谁能|有人接|接单吗|能接吗)'),
+    re.compile(rf'(?:预算|报价).{{0,12}}(?:\d+|[一二三四五六七八九十百千万]+|可聊|面议).{{0,24}}{SERVICE_OBJECT}'),
+    re.compile(rf'{SERVICE_OBJECT}.{{0,24}}(?:预算|报价).{{0,12}}(?:\d+|[一二三四五六七八九十百千万]+|可聊|面议)'),
+    re.compile(rf'(?:多少钱|怎么报价|报价多少).{{0,20}}{SERVICE_OBJECT}'),
+]
+HARD_NEGATIVE_PATTERNS = [
+    ('招聘/实习', re.compile(r'(?:找实习|实习生|招聘|诚聘|急招|校招|社招|投简历|简历投递|开发岗|岗位职责|薪资待遇)')),
+    ('内容推荐', re.compile(r'(?:网站推荐|学习网站|免费学习资源|建议收藏|推荐网站|必备.{0,8}网站|年度.{0,8}(?:最伟大|发现|发明)|本年度.{0,8}(?:最伟大|发现|发明)|用了几个)')),
+    ('服务商接单', re.compile(r'(?:^|[\s#｜|])(?:ui\s*)?接单[｜|:：]|^承接.{0,20}(?:网站|网页|小程序|开发|设计)|接单案例')),
 ]
 
 @dataclass(frozen=True)
@@ -54,18 +66,23 @@ class ScoreResult:
 def _direct_buyer(text: str) -> bool:
     return any(pattern.search(text) for pattern in DIRECT_BUYER_PATTERNS)
 
+def _hard_negative_hits(text: str) -> list[str]:
+    return [label for label, pattern in HARD_NEGATIVE_PATTERNS if pattern.search(text)]
+
 def prefilter_text(title: str, excerpt: str='') -> PrefilterResult:
     text = f'{title} {excerpt}'.lower()
     service_hits = [name for name, words in SERVICE_KEYWORDS.items() if any(w.lower() in text for w in words)]
     intent_hits = [w for w in INTENT_WORDS if w in text]
-    negative_hits = [w for w in NEGATIVE_WORDS if w in text]
-    if re.search(r'学习.{0,12}(?:课程|教程|路线|开发|编程|python|前端|小程序|ai)', text) and '学习咨询' not in negative_hits:
-        negative_hits.append('学习咨询')
+    soft_negative_hits = [w for w in NEGATIVE_WORDS if w in text]
+    if re.search(r'学习.{0,12}(?:课程|教程|路线|开发|编程|python|前端|小程序|ai)', text) and '学习咨询' not in soft_negative_hits:
+        soft_negative_hits.append('学习咨询')
+    hard_negative_hits = _hard_negative_hits(text)
+    negative_hits = soft_negative_hits + hard_negative_hits
     direct_buyer = _direct_buyer(text)
     paid = any(w in text for w in PAYMENT_WORDS)
-    has_intent = bool(intent_hits) or direct_buyer
-    blocked_by_negative = bool(negative_hits and not paid)
-    passed = bool(service_hits and has_intent) and not blocked_by_negative
+    strong_action = any(w in text for w in BUYER_ACTION_WORDS)
+    blocked_by_negative = bool(hard_negative_hits) or bool(soft_negative_hits and not (paid and direct_buyer))
+    passed = bool(service_hits and (direct_buyer or strong_action)) and not blocked_by_negative
     return PrefilterResult(passed, service_hits, intent_hits, negative_hits, direct_buyer)
 
 def _freshness(published_at: datetime | None) -> int:
@@ -88,7 +105,7 @@ def score_text(title: str, excerpt: str='', published_at: datetime | None=None, 
     if pf.direct_buyer:
         intent = max(intent, 82)
     if any(w in text for w in PAYMENT_WORDS): intent = min(100, intent+12)
-    if pf.negative_hits and not any(w in text for w in PAYMENT_WORDS): intent = max(0, intent-55)
+    if pf.negative_hits and not pf.passed: intent = max(0, intent-55)
     fit = 92 if category != '其他开发' else 35
     freshness = _freshness(published_at)
     urgency = 'high' if any(w in text for w in ['急','今天','尽快','马上']) else ('medium' if any(w in text for w in ['近期','最近']) else 'low')
