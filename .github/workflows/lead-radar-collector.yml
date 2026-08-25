@@ -1,0 +1,80 @@
+name: Lead Radar Collector
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "Optional one-off query override"
+        required: false
+        default: ""
+        type: string
+      max_queries:
+        description: "Number of query anchors to run"
+        required: true
+        default: "1"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+      dry_run:
+        description: "Fetch and inspect without production ingest"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: lead-radar-collector
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    # Scheduled collection is OFF until repository variable JUSTONE_COLLECTOR_ENABLED=true.
+    # Manual runs remain available for controlled production testing.
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.JUSTONE_COLLECTOR_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      JUSTONE_API_TOKEN: ${{ secrets.JUSTONE_API_TOKEN }}
+      LEAD_RADAR_API_BASE: https://nfzkphjbelyltrzgkdwt.supabase.co/functions/v1/lead-radar-api
+      JUSTONE_MAX_AGE_MINUTES: "1440"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate collector secret
+        run: |
+          if [ -z "$JUSTONE_API_TOKEN" ]; then
+            echo "Missing repository secret: JUSTONE_API_TOKEN"
+            exit 2
+          fi
+
+      - name: Collect fresh Xiaohongshu candidates
+        shell: bash
+        run: |
+          ARGS=(--max-queries "${{ github.event_name == 'workflow_dispatch' && inputs.max_queries || '1' }}")
+          if [ -n "${{ github.event_name == 'workflow_dispatch' && inputs.query || '' }}" ]; then
+            ARGS+=(--query "${{ github.event_name == 'workflow_dispatch' && inputs.query || '' }}")
+          fi
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}" = "true" ]; then
+            ARGS+=(--dry-run)
+          fi
+          python backend/collectors/justone_to_edge.py "${ARGS[@]}"
+
+      - name: Upload collector report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lead-radar-collector-${{ github.run_id }}
+          path: backend/collectors/output/
+          if-no-files-found: warn
+          retention-days: 14
