@@ -32,7 +32,7 @@ class MVPTests(unittest.TestCase):
             datetime.now(timezone.utc),
         )
         self.assertTrue(r.is_lead)
-        self.assertTrue(prefilter_text(r'急！需要icp+edi，小程序，知识付费，在线交易').direct_buyer)
+        self.assertTrue(prefilter_text('急！需要icp+edi，小程序，知识付费，在线交易').direct_buyer)
     def test_learning_request_is_filtered_even_with_search_wording(self):
         r=score_text('寻找适合学习AI开发的课程','推荐一下',datetime.now(timezone.utc))
         self.assertFalse(r.is_lead)
@@ -41,6 +41,30 @@ class MVPTests(unittest.TestCase):
         self.assertTrue(r.is_lead)
     def test_learning_filtered(self):
         self.assertFalse(prefilter_text('Python 怎么学','求课程推荐').passed)
+    def test_recruiting_is_not_a_lead(self):
+        r=score_text('海大有同学找实习吗？网站开发实习生','公司在学校旁边，主要工作是网站开发',datetime.now(timezone.utc))
+        self.assertFalse(r.is_lead)
+        self.assertIn('排除:招聘/实习', r.signals)
+    def test_content_recommendation_is_not_a_lead(self):
+        samples = [
+            ('这个网站我愿意称之为本年度最伟大的发明！！','#代码 #python #程序员 #免费学习资源网站 #网站推荐'),
+            ('我愿称这个网站为年度最伟大的发现！！！','#python #编程 #学习网站 #程序员'),
+            ('不体面，但很挣的5个网站','#副业赚零花钱 #学习网站 #项目'),
+            ('📚交易者必备｜8个实用参考网站建议收藏','炒股必看八大网站，你用了几个'),
+        ]
+        for title, excerpt in samples:
+            with self.subTest(title=title):
+                self.assertFalse(score_text(title, excerpt, datetime.now(timezone.utc)).is_lead)
+    def test_budget_article_is_not_a_buyer_request(self):
+        r=score_text(
+            '很多老板以为，网站做完上线就一劳永逸了。真不是。',
+            '最近帮朋友梳理他们公司官网的年度预算，顺手把网站维护这笔账拆开看了',
+            datetime.now(timezone.utc),
+        )
+        self.assertFalse(r.is_lead)
+    def test_service_provider_self_promo_is_not_a_lead(self):
+        r=score_text('UI 接单｜中医门诊预约挂号小程序','可承接UI设计和小程序页面',datetime.now(timezone.utc))
+        self.assertFalse(r.is_lead)
     def test_pipeline_and_dedupe(self):
         raw=RawLead('小红书','x1','有没有人会做微信小程序，有偿','预约系统，急',datetime.now(timezone.utc),'https://example.com/1','可聊')
         p=analyze_raw(raw,AIProvider()); self.assertIsNotNone(p)

@@ -20,18 +20,33 @@ const SERVICES = {
 };
 const INTENT = {
   "有偿": 24, "预算": 18, "多少钱": 18, "报价": 18, "找人": 22, "寻找": 26, "寻求": 24,
-  "求开发": 26, "找开发": 26, "开发团队": 26, "开发个人": 22, "程序员": 18, "开发者": 16,
-  "帮忙做": 22, "需要开发": 24, "需要做": 16, "急": 16, "外包": 24, "公司": 8, "项目": 8,
-  "可以聊": 8, "有没有人会": 14, "求助": 12, "找谁": 15, "想做": 16, "想搞": 16, "帮忙写": 20, "有没有会": 14
+  "求开发": 26, "找开发": 26, "开发团队": 26, "开发个人": 22, "帮忙做": 22, "需要开发": 24,
+  "需要做": 16, "急": 16, "急需": 20, "外包": 24, "可以聊": 8, "有没有人会": 14, "求助": 12,
+  "找谁": 15, "想做": 16, "想搞": 16, "帮忙写": 20, "有没有会": 14, "谁能做": 24, "谁会做": 22,
+  "有人能做": 22, "有人接": 20, "能接吗": 20, "接单吗": 18
 };
+const BUYER_ACTIONS = [
+  "有偿", "找人", "寻找", "寻求", "求开发", "找开发", "开发团队", "开发个人", "帮忙做", "需要开发",
+  "需要做", "急需", "外包", "有没有人会", "求助", "找谁", "想做", "想搞", "帮忙写", "有没有会",
+  "谁能做", "谁会做", "有人能做", "有人接", "能接吗", "接单吗"
+];
 const PAYMENT = ["有偿", "预算", "多少钱", "报价"];
 const NEGATIVE = ["教程", "怎么学", "学习路线", "推荐课程", "课程推荐", "想学", "零基础", "入门", "找工作", "面试", "源码分享", "难吗"];
+const SERVICE_OBJECT = String.raw`(?:小程序|微信小程序|网站|网页|官网|管理系统|系统|ai智能体|智能体|自动化|软件开发|独立站|h5|python|爬虫|脚本)`;
 const DIRECT_BUYER_PATTERNS = [
   /(?:寻找|寻求|找|求).{0,12}(?:开发|程序员|开发者|技术团队|开发团队)/,
   /(?:有没有|有没).{0,10}(?:会|能).{0,8}(?:做|开发|写|搭建)/,
-  /(?:需要|想要|准备|打算|想).{0,10}(?:做|开发|搭建|制作|写).{0,16}(?:小程序|网站|网页|系统|ai|智能体|脚本|自动化|独立站|h5)/,
-  /(?:急需|需要|求|想要|有偿|外包|预算|报价).{0,24}(?:小程序|微信小程序|网站|网页|官网|管理系统|系统|ai智能体|智能体|自动化|软件开发|独立站|h5|python|爬虫|脚本)/,
-  /(?:小程序|微信小程序|网站|网页|官网|管理系统|系统|ai智能体|智能体|自动化|软件开发|独立站|h5|python|爬虫|脚本).{0,20}(?:有偿|外包|预算|报价|找人|求助|急需|谁会|谁能)/
+  new RegExp(`(?:需要|想要|准备|打算|想).{0,10}(?:做|开发|搭建|制作|写).{0,16}${SERVICE_OBJECT}`),
+  new RegExp(`(?:急需|需要|求|想要|有偿|外包).{0,24}${SERVICE_OBJECT}`),
+  new RegExp(`${SERVICE_OBJECT}.{0,20}(?:有偿|外包|找人|求助|急需|谁会|谁能|有人接|接单吗|能接吗)`),
+  new RegExp(`(?:预算|报价).{0,12}(?:\\d+|[一二三四五六七八九十百千万]+|可聊|面议).{0,24}${SERVICE_OBJECT}`),
+  new RegExp(`${SERVICE_OBJECT}.{0,24}(?:预算|报价).{0,12}(?:\\d+|[一二三四五六七八九十百千万]+|可聊|面议)`),
+  new RegExp(`(?:多少钱|怎么报价|报价多少).{0,20}${SERVICE_OBJECT}`)
+];
+const HARD_NEGATIVE_PATTERNS = [
+  ["招聘/实习", /(?:找实习|实习生|招聘|诚聘|急招|校招|社招|投简历|简历投递|开发岗|岗位职责|薪资待遇)/],
+  ["内容推荐", /(?:网站推荐|学习网站|免费学习资源|建议收藏|推荐网站|必备.{0,8}网站|年度.{0,8}(?:最伟大|发现|发明)|本年度.{0,8}(?:最伟大|发现|发明)|用了几个)/],
+  ["服务商接单", /(?:^|[\s#｜|])(?:ui\s*)?接单[｜|:：]|^承接.{0,20}(?:网站|网页|小程序|开发|设计)|接单案例/]
 ];
 
 function cors(origin = "") {
@@ -73,30 +88,20 @@ async function findSeen(item, dedupeKey) {
 }
 async function touchSeen(id) {
   await rest(`lead_radar_seen_items?id=eq.${id}`, {
-    method: "PATCH",
-    headers: { Prefer: "return=minimal" },
-    body: JSON.stringify({ last_seen_at: new Date().toISOString() })
+    method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ last_seen_at: new Date().toISOString() })
   });
 }
 async function createSeen(item, dedupeKey) {
   const rows = await rest("lead_radar_seen_items?select=*", {
     method: "POST",
     headers: { Prefer: "return=representation" },
-    body: JSON.stringify({
-      source: item.source,
-      source_id: item.external_id,
-      dedupe_key: dedupeKey,
-      disposition: "seen",
-      metadata: { published_at: item.published_at, url: item.url }
-    })
+    body: JSON.stringify({ source: item.source, source_id: item.external_id, dedupe_key: dedupeKey, disposition: "seen", metadata: { published_at: item.published_at, url: item.url } })
   });
   return rows?.[0] || null;
 }
 async function updateSeen(id, disposition, leadId = null) {
   await rest(`lead_radar_seen_items?id=eq.${id}`, {
-    method: "PATCH",
-    headers: { Prefer: "return=minimal" },
-    body: JSON.stringify({ disposition, lead_id: leadId, last_seen_at: new Date().toISOString() })
+    method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ disposition, lead_id: leadId, last_seen_at: new Date().toISOString() })
   });
 }
 function safeUrl(value) {
@@ -132,18 +137,22 @@ function prefilter(item) {
   const text = `${item.title} ${item.excerpt}`.toLowerCase();
   const serviceHits = Object.entries(SERVICES).filter(([, words]) => words.some((word) => text.includes(word))).map(([name]) => name);
   const intentHits = Object.keys(INTENT).filter((word) => text.includes(word));
-  const negativeHits = NEGATIVE.filter((word) => text.includes(word));
-  if (/学习.{0,12}(?:课程|教程|路线|开发|编程|python|前端|小程序|ai)/.test(text) && !negativeHits.includes("学习咨询")) negativeHits.push("学习咨询");
+  const softNegativeHits = NEGATIVE.filter((word) => text.includes(word));
+  if (/学习.{0,12}(?:课程|教程|路线|开发|编程|python|前端|小程序|ai)/.test(text) && !softNegativeHits.includes("学习咨询")) softNegativeHits.push("学习咨询");
+  const hardNegativeHits = HARD_NEGATIVE_PATTERNS.filter(([, pattern]) => pattern.test(text)).map(([label]) => label);
+  const negativeHits = [...softNegativeHits, ...hardNegativeHits];
   const directBuyer = DIRECT_BUYER_PATTERNS.some((pattern) => pattern.test(text));
   const paid = PAYMENT.some((word) => text.includes(word));
-  const passed = Boolean(serviceHits.length && (intentHits.length || directBuyer)) && !(negativeHits.length && !paid);
+  const strongAction = BUYER_ACTIONS.some((word) => text.includes(word));
+  const blocked = Boolean(hardNegativeHits.length) || Boolean(softNegativeHits.length && !(paid && directBuyer));
+  const passed = Boolean(serviceHits.length && (directBuyer || strongAction)) && !blocked;
   return { passed, text, serviceHits, intentHits, negativeHits, directBuyer };
 }
 function ruleClassification(item, pf) {
   let intent = Math.min(100, pf.intentHits.reduce((sum, word) => sum + INTENT[word], 0));
   if (pf.directBuyer) intent = Math.max(intent, 82);
   if (PAYMENT.some((word) => pf.text.includes(word))) intent = Math.min(100, intent + 12);
-  if (pf.negativeHits.length && !PAYMENT.some((word) => pf.text.includes(word))) intent = Math.max(0, intent - 55);
+  if (pf.negativeHits.length && !pf.passed) intent = Math.max(0, intent - 55);
   const fit = pf.serviceHits.length ? 92 : 35;
   const freshness = freshnessScore(item.published_at);
   const urgency = ["急", "今天", "尽快", "马上"].some((word) => pf.text.includes(word)) ? "high" : (["近期", "最近"].some((word) => pf.text.includes(word)) ? "medium" : "low");
@@ -187,7 +196,7 @@ async function semanticClassification(item, base) {
   const payload = {
     model: OPENAI_MODEL,
     store: false,
-    instructions: "你是开发外包需求分类器。高精度优先。像‘寻找AI智能体开发团队或个人’、‘找人做网站’、‘有没有会做小程序的’、‘急！需要icp+edi，小程序，知识付费，在线交易’这类明确寻找开发方或提出待实现产品需求的表达，即使未公开预算，也属于强购买/外包意图。学习教程、课程推荐、泛讨论、求职招聘、服务商自我宣传、纯技术问答必须判为 false。不要提取或推断个人敏感信息。",
+    instructions: "你是开发外包需求分类器。高精度优先。只有明确寻找开发方、要求实现产品、询价或外包的帖子才是 Lead。招聘/实习、教程/学习资源、网站推荐/收藏清单、服务商自我接单宣传、泛讨论必须判为 false。像‘寻找AI智能体开发团队或个人’、‘找人做网站’、‘急！需要icp+edi，小程序，知识付费，在线交易’属于强购买意图。不要提取或推断个人敏感信息。",
     input: [{ role: "user", content: [{ type: "input_text", text: `请输出符合 schema 的 JSON。\n标题：${item.title}\n正文摘要：${item.excerpt}\n已知预算：${item.budget || "未公开"}` }] }],
     text: { format: { type: "json_schema", name: "lead_classification", strict: true, schema } }
   };
@@ -243,7 +252,7 @@ Deno.serve(async (req) => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^.*\/lead-radar-api/, "") || "/";
     if (method === "GET" && path === "/health") {
-      return json({ ok: true, service: "lead-radar-api", version: "0.7-edge", timestamp: new Date().toISOString(), ai_provider: OPENAI_KEY && OPENAI_MODEL ? "openai" : "rules" }, 200, origin);
+      return json({ ok: true, service: "lead-radar-api", version: "0.8-edge", rules_version: "precision-v2", timestamp: new Date().toISOString(), ai_provider: OPENAI_KEY && OPENAI_MODEL ? "openai" : "rules" }, 200, origin);
     }
     if (method === "GET" && path === "/api/v1/leads") {
       const min = Math.max(0, Math.min(100, Number(url.searchParams.get("min_score") || 0)));
@@ -281,7 +290,6 @@ Deno.serve(async (req) => {
           if (seen.lead_id) leadIds.push(seen.lead_id);
           continue;
         }
-
         const existing = await rest(item.external_id
           ? `lead_radar_leads?source=eq.${encodeURIComponent(item.source)}&source_id=eq.${encodeURIComponent(item.external_id)}&select=id,status&limit=1`
           : `lead_radar_leads?dedupe_key=eq.${dedupeKey}&select=id,status&limit=1`);
@@ -292,11 +300,9 @@ Deno.serve(async (req) => {
           leadIds.push(existing[0].id);
           continue;
         }
-
         if (!seen) seen = await createSeen(item, dedupeKey);
         else await updateSeen(seen.id, "seen", null);
         if (!seen) throw new Error("Failed to create candidate seen record");
-
         try {
           const analysis = await analyze(item);
           if (!analysis) {
@@ -323,7 +329,7 @@ Deno.serve(async (req) => {
     }
     if (method === "GET" && path === "/api/v1/monitor/status") {
       const runs = await rest("lead_radar_scan_runs?select=*&order=started_at.desc&limit=1");
-      return json({ running: false, mode: "production-source-collector", platforms: ["justone-xiaohongshu-v4", "manual", "browser-helper"], last_scan_at: runs?.[0]?.finished_at || null, ai_provider: OPENAI_KEY && OPENAI_MODEL ? "openai" : "rules", notification_enabled: Boolean(FEISHU_WEBHOOK_URL), note: "Xiaohongshu source collection is handled by an authenticated GitHub Actions collector; every candidate is deduped before semantic AI. Manual/browser-assisted import remains available. No anti-bot bypass." }, 200, origin);
+      return json({ running: false, mode: "production-source-collector", platforms: ["justone-xiaohongshu-v4", "manual", "browser-helper"], last_scan_at: runs?.[0]?.finished_at || null, ai_provider: OPENAI_KEY && OPENAI_MODEL ? "openai" : "rules", notification_enabled: Boolean(FEISHU_WEBHOOK_URL), note: "Xiaohongshu source collection is authenticated with GitHub Actions OIDC; every candidate is deduped before semantic AI and hard-negative precision filters remove recruiting/content/self-promo noise." }, 200, origin);
     }
     if (method === "POST" && path === "/api/v1/monitor/scan") {
       if (!ALLOWED.has(origin)) return json({ detail: "Write origin required" }, 403, origin);
