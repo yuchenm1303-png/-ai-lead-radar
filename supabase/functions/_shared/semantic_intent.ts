@@ -1,6 +1,6 @@
 import type { ActorRole, PolicyAssessment } from "./lead_policy.ts";
 
-export const INTELLIGENCE_VERSION = "3.1.1";
+export const INTELLIGENCE_VERSION = "3.2.0";
 export type SemanticProvider = "openai" | "minimax";
 export const DEFAULT_SEMANTIC_PROVIDER: SemanticProvider = "openai";
 export const DEFAULT_SEMANTIC_MODELS: Record<SemanticProvider, string> = {
@@ -9,7 +9,7 @@ export const DEFAULT_SEMANTIC_MODELS: Record<SemanticProvider, string> = {
 };
 export const DEFAULT_SEMANTIC_MODEL = DEFAULT_SEMANTIC_MODELS.openai;
 
-export type TransactionDirection = "buy" | "sell" | "recruit" | "learn" | "discuss" | "unknown";
+export type TransactionDirection = "buy" | "sell" | "recruit" | "non_transactional" | "unknown";
 export type SemanticDecision = "accept" | "reject" | "uncertain";
 export type SemanticMode = "off" | "shadow" | "enforce";
 
@@ -158,7 +158,7 @@ const RESPONSE_SCHEMA = {
         properties: {
           id: { type: "string" },
           actor_role: { type: "string", enum: ["buyer", "provider", "recruiter", "learner", "content", "unknown"] },
-          transaction_direction: { type: "string", enum: ["buy", "sell", "recruit", "learn", "discuss", "unknown"] },
+          transaction_direction: { type: "string", enum: ["buy", "sell", "recruit", "non_transactional", "unknown"] },
           buyer_probability: { type: "integer", minimum: 0, maximum: 100 },
           confidence: { type: "integer", minimum: 0, maximum: 100 },
           project_specificity: { type: "integer", minimum: 0, maximum: 100 },
@@ -175,16 +175,20 @@ const RESPONSE_SCHEMA = {
 } as const;
 
 const SYSTEM_INSTRUCTIONS = `You are the buyer-intent classifier for a software-development lead radar.
-Classify the AUTHOR'S transaction role from the overall meaning, not by keyword overlap.
-A buyer is an author who wants to commission, outsource, or hire a vendor/freelancer to build or modify software, a website, mini-program, app, automation, AI system, script, data solution, or a closely related custom digital product for the author's own real need.
-A provider is an author advertising development services, soliciting clients, showing cases, giving vendor-marketing advice, or saying they can build software for others.
-Recruitment for employees/interns is recruiter, not buyer. Learning/tutorial/resource sharing is learner/content. General troubleshooting of an existing third-party website/app is not a software-development purchase unless the author is explicitly seeking custom development help.
+Classify the AUTHOR'S actor role and transaction direction from the overall meaning, not by keyword overlap.
+Actor role and transaction direction are separate dimensions.
+A buyer is an author who wants to commission, outsource, or hire a vendor/freelancer to build or modify software, a website, mini-program, app, automation, AI system, script, data solution, or a closely related custom digital product for the author's own real need. Direction=buy.
+A provider advertises development services, solicits clients, shows cases, gives vendor-marketing advice, or says they can build software for others. Direction=sell.
+Recruitment for employees/interns is recruiter. Direction=recruit.
+Learning, tutorials, resource recommendations, commentary, entertainment, and ordinary troubleshooting are non-transactional. Use actor_role learner/content/unknown as appropriate and transaction_direction=non_transactional.
+Use direction=unknown only when even the transactional nature is genuinely unclear.
+General troubleshooting of an existing third-party website/app is not a software-development purchase unless the author is explicitly seeking custom development help.
 Do not call something a buyer merely because it contains phrases such as 找开发, 求助, 小程序开发, 网站, 外包, or 报价. Determine who is buying from whom.
 The buyer_probability field means the probability that this post represents demand for CUSTOM SOFTWARE/DEVELOPMENT SERVICES, not merely that the author is buying any product or service.
 Examples:
 - 寻找杭州本地小程序开发的公司或者个人；公司有数字化升级需求 => buyer / buy.
 - 小程序接定制开发；全行业都能做；需要的可以说需求 => provider / sell.
-- 求助：学校网站怎么填写；某网站打不开；网页游戏求助 => unknown/content / discuss, not buyer.
+- 求助：学校网站怎么填写；某网站打不开；网页游戏求助 => unknown/content / non_transactional, not buyer.
 Return one result for every input id. Keep reasons short and evidence grounded in the text. Evidence should contain at most four short phrases.`;
 
 function semanticInput(candidates: SemanticCandidate[]) {
@@ -219,7 +223,7 @@ export function buildMiniMaxSemanticRequest(candidates: SemanticCandidate[], mod
     items: [{
       id: "same input id",
       actor_role: "buyer|provider|recruiter|learner|content|unknown",
-      transaction_direction: "buy|sell|recruit|learn|discuss|unknown",
+      transaction_direction: "buy|sell|recruit|non_transactional|unknown",
       buyer_probability: "integer 0-100",
       confidence: "integer 0-100",
       project_specificity: "integer 0-100",
@@ -248,7 +252,6 @@ export function buildMiniMaxSemanticRequest(candidates: SemanticCandidate[], mod
   };
 }
 
-// Kept as a compatibility alias for existing tests/callers.
 export function buildSemanticRequest(candidates: SemanticCandidate[], model: string) {
   return buildOpenAISemanticRequest(candidates, model);
 }
@@ -280,7 +283,7 @@ function normalizeAssessment(value: any): SemanticAssessment | null {
   const role = String(value?.actor_role || "unknown") as ActorRole;
   const direction = String(value?.transaction_direction || "unknown") as TransactionDirection;
   if (!id || !["buyer", "provider", "recruiter", "learner", "content", "unknown"].includes(role)) return null;
-  if (!["buy", "sell", "recruit", "learn", "discuss", "unknown"].includes(direction)) return null;
+  if (!["buy", "sell", "recruit", "non_transactional", "unknown"].includes(direction)) return null;
   return {
     id,
     actor_role: role,
