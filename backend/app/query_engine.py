@@ -51,13 +51,23 @@ def _number(value: Any, fallback: float = 0.0) -> float:
     return parsed if math.isfinite(parsed) else fallback
 
 
-def _query_terms(topic: dict[str, Any]) -> list[str]:
+def _query_terms(topic: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    topic_key = str(topic.get("key") or "").strip()
+    configured = config.get("topic_terms", {}).get(topic_key)
+    source = configured if isinstance(configured, list) else topic.get("query_terms", [])
     result: list[str] = []
-    for raw in topic.get("query_terms", []):
+    for raw in source:
         value = str(raw or "").strip()
         if value and value not in result:
             result.append(value)
     return result
+
+
+def _precision_templates(family: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    family_key = str(family.get("key") or "").strip()
+    configured = config.get("precision_templates", {}).get(family_key)
+    source = configured if isinstance(configured, list) else family.get("query_templates", [])
+    return [str(item).strip() for item in source if str(item).strip()]
 
 
 def _lane_prior(config: dict[str, Any], lane: str) -> float:
@@ -82,14 +92,14 @@ def _build_portfolio() -> tuple[QuerySpec, ...]:
         topic_key = str(topic.get("key") or "").strip()
         category = str(topic.get("category") or "其他开发")
         topic_prior = _number(topic.get("prior"), 1.0)
-        terms = _query_terms(topic)
+        terms = _query_terms(topic, config)
         if not topic_key or not terms:
             continue
 
         for family in policy.get("intent_families", []):
             family_key = str(family.get("key") or "").strip()
             family_prior = _number(family.get("prior"), 1.0)
-            templates = [str(item).strip() for item in family.get("query_templates", []) if str(item).strip()]
+            templates = _precision_templates(family, config)
             if not family_key or not templates:
                 continue
             for term_index, term in enumerate(terms):
