@@ -1,4 +1,5 @@
 import { assessText, POLICY_VERSION, type PolicyAssessment } from "../_shared/lead_policy.ts";
+import { RETRIEVAL_VERSION } from "../_shared/retrieval_policy.ts";
 
 const SB_URL = Deno.env.get("SUPABASE_URL") || "";
 const LEGACY_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
@@ -225,6 +226,69 @@ async function recordQueryMetric(context: any, counts: any) {
   }
 }
 
+async function recordQueryRun(context: any, items: any[], decisions: any[], counts: any) {
+  if (!context?.query_key || context.query_key === "manual") return;
+  try {
+    const rows = await rest("lead_radar_query_runs?select=id", {
+      method: "POST",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify({
+        scan_request_id: Number.isInteger(Number(context.scan_request_id)) && Number(context.scan_request_id) > 0 ? Number(context.scan_request_id) : null,
+        provider: String(context.provider || "justone-xiaohongshu-v4").slice(0, 120),
+        retrieval_version: String(context.retrieval_version || RETRIEVAL_VERSION).slice(0, 40),
+        query_key: String(context.query_key).slice(0, 160),
+        query_text: String(context.query_text || "").slice(0, 240),
+        lane: String(context.lane || "precision").slice(0, 40),
+        intent_family: String(context.intent_family || "").slice(0, 80),
+        topic_family: String(context.topic_family || "").slice(0, 80),
+        started_at: context.started_at || new Date().toISOString(),
+        finished_at: new Date().toISOString(),
+        pages: Math.max(0, Number(context.pages || 1)),
+        api_calls: Math.max(0, Number(context.api_calls || 1)),
+        returned_count: Math.max(0, Number(context.returned_count || 0)),
+        normalized_count: Math.max(0, Number(context.normalized_count || items.length)),
+        fresh_count: Math.max(0, Number(context.fresh_count || 0)),
+        qualified_count: Math.max(0, Number(counts.stored || 0)),
+        filtered_count: Math.max(0, Number(counts.filtered || 0)),
+        duplicate_count: Math.max(0, Number(counts.duplicates || 0)),
+        newest_published_at: context.newest_published_at || null,
+        oldest_published_at: context.oldest_published_at || null,
+      }),
+    });
+    const queryRunId = Number(rows?.[0]?.id || 0);
+    if (!queryRunId) return;
+
+    const decisionById = new Map<string, any>();
+    for (const decision of decisions) {
+      const id = String(decision?.external_id || "");
+      if (id) decisionById.set(id, decision);
+    }
+    const observations = items
+      .filter((item) => item?.external_id)
+      .map((item) => {
+        const decision = decisionById.get(String(item.external_id)) || {};
+        return {
+          query_run_id: queryRunId,
+          source: String(item.source || "manual").slice(0, 40),
+          source_id: String(item.external_id).slice(0, 160),
+          lead_id: Number.isInteger(Number(decision.lead_id)) && Number(decision.lead_id) > 0 ? Number(decision.lead_id) : null,
+          disposition: String(decision.disposition || "unknown").slice(0, 40),
+          score: Number.isFinite(Number(decision.score)) ? Number(decision.score) : null,
+          published_at: item.published_at || null,
+        };
+      });
+    if (observations.length) {
+      await rest("lead_radar_query_observations", {
+        method: "POST",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify(observations),
+      });
+    }
+  } catch (error) {
+    console.warn("query run attribution failed", String(error));
+  }
+}
+
 async function ingest(payload: any) {
   const rawItems = Array.isArray(payload?.items) ? payload.items : [];
   const items = rawItems.map(normalizeItem).filter(Boolean).slice(0, 100);
@@ -268,20 +332,21 @@ async function ingest(payload: any) {
 
   const counts = { received: items.length, stored, filtered, duplicates, notified, lead_ids: leadIds };
   await recordQueryMetric(payload?.query_context || null, counts);
-  return { ok: true, policy_version: POLICY_VERSION, ...counts, decisions };
+  await recordQueryRun(payload?.query_context || null, items, decisions, counts);
+  return { ok: true, policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION, ...counts, decisions };
 }
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") return new Response(null, { status: 204 });
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname.endsWith("/health")) {
-    return json({ ok: true, service: "lead-radar-ingest", policy_version: POLICY_VERSION, auth: "server-to-server" });
+    return json({ ok: true, service: "lead-radar-ingest", policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION, auth: "server-to-server" });
   }
   if (!authorized(request)) return json({ detail: "Unauthorized" }, 401);
   if (request.method !== "POST" || !url.pathname.endsWith("/api/v1/ingest")) return json({ detail: "Not found" }, 404);
   try {
     return json(await ingest(await request.json()));
   } catch (error) {
-    return json({ detail: String(error).slice(0, 500), policy_version: POLICY_VERSION }, 500);
+    return json({ detail: String(error).slice(0, 500), policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION }, 500);
   }
 });
