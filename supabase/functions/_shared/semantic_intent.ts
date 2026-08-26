@@ -1,7 +1,13 @@
 import type { ActorRole, PolicyAssessment } from "./lead_policy.ts";
 
-export const INTELLIGENCE_VERSION = "3.0.0";
-export const DEFAULT_SEMANTIC_MODEL = "gpt-5.4-nano";
+export const INTELLIGENCE_VERSION = "3.1.0";
+export type SemanticProvider = "openai" | "minimax";
+export const DEFAULT_SEMANTIC_PROVIDER: SemanticProvider = "openai";
+export const DEFAULT_SEMANTIC_MODELS: Record<SemanticProvider, string> = {
+  openai: "gpt-5.4-nano",
+  minimax: "MiniMax-M2.7",
+};
+export const DEFAULT_SEMANTIC_MODEL = DEFAULT_SEMANTIC_MODELS.openai;
 
 export type TransactionDirection = "buy" | "sell" | "recruit" | "learn" | "discuss" | "unknown";
 export type SemanticDecision = "accept" | "reject" | "uncertain";
@@ -10,7 +16,7 @@ export type SemanticMode = "off" | "shadow" | "enforce";
 export interface IntelligenceSettings {
   enabled: boolean;
   mode: SemanticMode;
-  provider: "openai";
+  provider: SemanticProvider;
   model: string;
   buyer_threshold: number;
   min_confidence: number;
@@ -50,8 +56,12 @@ function clamp(value: unknown, min = 0, max = 100, fallback = 0) {
   return Math.max(min, Math.min(max, Math.round(number)));
 }
 
-export function providerReady() {
-  return Boolean((Deno.env.get("OPENAI_API_KEY") || "").trim());
+export function defaultSemanticModel(provider: SemanticProvider) {
+  return DEFAULT_SEMANTIC_MODELS[provider];
+}
+
+export function providerReady(apiKey: string | null | undefined) {
+  return Boolean(String(apiKey || "").trim());
 }
 
 export function hardGuardrail(assessment: PolicyAssessment): GuardrailResult {
@@ -124,18 +134,21 @@ Examples:
 - 求助：学校网站怎么填写；某网站打不开；网页游戏求助 => unknown/content / discuss, not buyer.
 Return one result for every input id. Keep reasons short and evidence grounded in the text. Evidence should contain at most four short phrases.`;
 
-export function buildSemanticRequest(candidates: SemanticCandidate[], model: string) {
-  const input = candidates.map((item) => ({
+function semanticInput(candidates: SemanticCandidate[]) {
+  return candidates.map((item) => ({
     id: item.id,
     title: item.title.slice(0, 240),
     excerpt: item.excerpt.slice(0, 1600),
     author_name: String(item.author_name || "").slice(0, 120),
   }));
+}
+
+export function buildOpenAISemanticRequest(candidates: SemanticCandidate[], model: string) {
   return {
     model,
     store: false,
     instructions: SYSTEM_INSTRUCTIONS,
-    input: JSON.stringify({ items: input }),
+    input: JSON.stringify({ items: semanticInput(candidates) }),
     text: {
       format: {
         type: "json_schema",
@@ -148,7 +161,44 @@ export function buildSemanticRequest(candidates: SemanticCandidate[], model: str
   };
 }
 
-function extractOutputText(data: any) {
+export function buildMiniMaxSemanticRequest(candidates: SemanticCandidate[], model: string) {
+  const requiredShape = {
+    items: [{
+      id: "same input id",
+      actor_role: "buyer|provider|recruiter|learner|content|unknown",
+      transaction_direction: "buy|sell|recruit|learn|discuss|unknown",
+      buyer_probability: "integer 0-100",
+      confidence: "integer 0-100",
+      project_specificity: "integer 0-100",
+      reason: "short reason",
+      evidence: ["up to four short phrases"],
+    }],
+  };
+  return {
+    model,
+    max_tokens: 6000,
+    temperature: 0.1,
+    system: `${SYSTEM_INSTRUCTIONS}\nReturn ONLY one valid JSON object. No markdown fences and no prose outside JSON.`,
+    messages: [{
+      role: "user",
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          task: "Classify every item and return exactly one result per input id.",
+          output_shape: requiredShape,
+          items: semanticInput(candidates),
+        }),
+      }],
+    }],
+  };
+}
+
+// Kept as a compatibility alias for existing tests/callers.
+export function buildSemanticRequest(candidates: SemanticCandidate[], model: string) {
+  return buildOpenAISemanticRequest(candidates, model);
+}
+
+function extractOpenAIOutputText(data: any) {
   if (typeof data?.output_text === "string" && data.output_text.trim()) return data.output_text.trim();
   return (Array.isArray(data?.output) ? data.output : [])
     .filter((item: any) => item?.type === "message")
@@ -157,6 +207,20 @@ function extractOutputText(data: any) {
     .map((item: any) => item.text)
     .join("")
     .trim();
+}
+
+function extractMiniMaxOutputText(data: any) {
+  return (Array.isArray(data?.content) ? data.content : [])
+    .filter((item: any) => item?.type === "text" && typeof item?.text === "string")
+    .map((item: any) => item.text)
+    .join("")
+    .trim();
+}
+
+function stripJsonFence(value: string) {
+  const text = value.trim();
+  if (!text.startsWith("```")) return text;
+  return text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
 }
 
 function normalizeAssessment(value: any): SemanticAssessment | null {
@@ -177,31 +241,73 @@ function normalizeAssessment(value: any): SemanticAssessment | null {
   };
 }
 
-export async function classifySemanticBatch(
-  candidates: SemanticCandidate[],
-  settings: IntelligenceSettings,
-  fetchImpl: typeof fetch = fetch,
-): Promise<Map<string, SemanticAssessment>> {
-  const result = new Map<string, SemanticAssessment>();
-  if (!settings.enabled || settings.mode === "off" || !candidates.length || !providerReady()) return result;
-  const apiKey = (Deno.env.get("OPENAI_API_KEY") || "").trim();
-  const response = await fetchImpl("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify(buildSemanticRequest(candidates, settings.model || DEFAULT_SEMANTIC_MODEL)),
-    signal: AbortSignal.timeout(25000),
-  });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`semantic provider ${response.status}: ${text.slice(0, 240)}`);
-  let data: any;
-  try { data = JSON.parse(text); } catch { throw new Error("semantic provider returned invalid JSON"); }
-  const output = extractOutputText(data);
-  if (!output) throw new Error("semantic provider returned no structured output");
+function parseSemanticOutput(output: string) {
   let parsed: any;
-  try { parsed = JSON.parse(output); } catch { throw new Error("semantic structured output was invalid JSON"); }
+  try { parsed = JSON.parse(stripJsonFence(output)); } catch { throw new Error("semantic structured output was invalid JSON"); }
+  const result = new Map<string, SemanticAssessment>();
   for (const value of Array.isArray(parsed?.items) ? parsed.items : []) {
     const normalized = normalizeAssessment(value);
     if (normalized) result.set(normalized.id, normalized);
   }
   return result;
+}
+
+async function classifyOpenAI(
+  candidates: SemanticCandidate[],
+  settings: IntelligenceSettings,
+  apiKey: string,
+  fetchImpl: typeof fetch,
+) {
+  const response = await fetchImpl("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify(buildOpenAISemanticRequest(candidates, settings.model || defaultSemanticModel("openai"))),
+    signal: AbortSignal.timeout(25000),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`openai semantic provider ${response.status}: ${text.slice(0, 240)}`);
+  let data: any;
+  try { data = JSON.parse(text); } catch { throw new Error("openai semantic provider returned invalid JSON"); }
+  const output = extractOpenAIOutputText(data);
+  if (!output) throw new Error("openai semantic provider returned no structured output");
+  return parseSemanticOutput(output);
+}
+
+async function classifyMiniMax(
+  candidates: SemanticCandidate[],
+  settings: IntelligenceSettings,
+  apiKey: string,
+  fetchImpl: typeof fetch,
+) {
+  const response = await fetchImpl("https://api.minimax.io/anthropic/v1/messages", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify(buildMiniMaxSemanticRequest(candidates, settings.model || defaultSemanticModel("minimax"))),
+    signal: AbortSignal.timeout(30000),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`minimax semantic provider ${response.status}: ${text.slice(0, 240)}`);
+  let data: any;
+  try { data = JSON.parse(text); } catch { throw new Error("minimax semantic provider returned invalid JSON"); }
+  const output = extractMiniMaxOutputText(data);
+  if (!output) throw new Error("minimax semantic provider returned no text output");
+  return parseSemanticOutput(output);
+}
+
+export async function classifySemanticBatch(
+  candidates: SemanticCandidate[],
+  settings: IntelligenceSettings,
+  apiKey: string | null | undefined,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Map<string, SemanticAssessment>> {
+  if (!settings.enabled || settings.mode === "off" || !candidates.length || !providerReady(apiKey)) {
+    return new Map<string, SemanticAssessment>();
+  }
+  const credential = String(apiKey || "").trim();
+  if (settings.provider === "minimax") return await classifyMiniMax(candidates, settings, credential, fetchImpl);
+  return await classifyOpenAI(candidates, settings, credential, fetchImpl);
 }
