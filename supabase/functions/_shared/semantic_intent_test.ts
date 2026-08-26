@@ -1,4 +1,4 @@
-import { assessText } from "./lead_policy.ts";
+import { assessText, type PolicyAssessment } from "./lead_policy.ts";
 import {
   buildSemanticRequest,
   decideSemantic,
@@ -22,14 +22,16 @@ const settings: IntelligenceSettings = {
   max_items_per_batch: 20,
 };
 
-Deno.test("hard guardrail rejects obvious provider/content but routes ambiguous buyer candidates to semantics", () => {
+Deno.test("hard guardrail rejects only high-confidence negatives and routes ambiguous candidates to semantics", () => {
   const provider = assessText("小程序接定制开发", "全行业都能做，需要的可以说一下你的需求，小程序商城网站开发都可以");
   const tutorial = assessText("老师傅私藏4个维修宝藏网站", "维修界百科全书，教程超详细，建议收藏");
   const realBuyer = assessText("寻找杭州本地小程序开发的公司或者个人", "因公司数字化升级需求，长期寻找杭州小程序定制开发正规技术公司");
   const noisyHelp = assessText("关西学院大学院出愿求助！！！", "学校网站填写出愿信息时不知道高校代码怎么填");
+  const uncertainProvider: PolicyAssessment = { ...provider, confidence: 72 };
 
-  assert(hardGuardrail(provider).action === "reject", `provider role=${provider.actor_role}`);
-  assert(hardGuardrail(tutorial).action === "reject", `tutorial role=${tutorial.actor_role}`);
+  assert(hardGuardrail(provider).action === "reject", `provider role=${provider.actor_role} confidence=${provider.confidence}`);
+  assert(hardGuardrail(tutorial).action === "reject", `tutorial role=${tutorial.actor_role} confidence=${tutorial.confidence}`);
+  assert(hardGuardrail(uncertainProvider).action === "semantic", "low-confidence provider rule must not bypass semantic review");
   assert(hardGuardrail(realBuyer).action === "semantic", `buyer role=${realBuyer.actor_role}`);
   assert(hardGuardrail(noisyHelp).action === "semantic", `noisy help should be semantic, role=${noisyHelp.actor_role}`);
 });
