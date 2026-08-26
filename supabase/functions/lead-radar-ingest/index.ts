@@ -5,11 +5,13 @@ import {
   decideSemantic,
   hardGuardrail,
   providerReady,
+  defaultSemanticModel,
   DEFAULT_SEMANTIC_MODEL,
   INTELLIGENCE_VERSION,
   type IntelligenceSettings,
   type SemanticAssessment,
   type SemanticDecision,
+  type SemanticProvider,
 } from "../_shared/semantic_intent.ts";
 
 const SB_URL = Deno.env.get("SUPABASE_URL") || "";
@@ -173,6 +175,10 @@ function clampInt(value: unknown, fallback: number, min = 0, max = 100) {
   return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.round(number))) : fallback;
 }
 
+function semanticProvider(value: unknown): SemanticProvider {
+  return String(value || "").toLowerCase() === "minimax" ? "minimax" : "openai";
+}
+
 async function intelligenceSettings(): Promise<IntelligenceSettings> {
   const defaults: IntelligenceSettings = {
     enabled: false,
@@ -189,11 +195,13 @@ async function intelligenceSettings(): Promise<IntelligenceSettings> {
     const row = Array.isArray(rows) ? rows[0] : null;
     if (!row) return defaults;
     const mode = ["off", "shadow", "enforce"].includes(String(row.semantic_mode)) ? String(row.semantic_mode) as IntelligenceSettings["mode"] : defaults.mode;
+    const provider = semanticProvider(row.provider);
+    const providerModel = defaultSemanticModel(provider);
     return {
       enabled: Boolean(row.semantic_enabled),
       mode,
-      provider: "openai",
-      model: String(row.model || defaults.model).trim().slice(0, 120) || defaults.model,
+      provider,
+      model: String(row.model || providerModel).trim().slice(0, 120) || providerModel,
       buyer_threshold: clampInt(row.buyer_threshold, defaults.buyer_threshold),
       min_confidence: clampInt(row.min_confidence, defaults.min_confidence),
       reject_confidence: clampInt(row.reject_confidence, defaults.reject_confidence),
@@ -490,7 +498,7 @@ async function ingest(payload: any) {
   const semanticActive = settings.enabled && settings.mode !== "off" && providerReady();
   const decisions: any[] = [];
   let stored = 0, filtered = 0, duplicates = 0, notified = 0;
-  let semanticCandidates = 0, semanticCalls = 0, semanticCached = 0, semanticRejected = 0, semanticUncertain = 0;
+  let semanticCandidates = 0, semanticCalls = 0, semanticCached = 0, semanticAccepted = 0, semanticRejected = 0, semanticUncertain = 0;
   const leadIds: number[] = [];
   const pending: any[] = [];
 
@@ -524,14 +532,17 @@ async function ingest(payload: any) {
   }
 
   const semanticById = new Map<string, SemanticAssessment>();
+  const cachedSemanticIds = new Set<string>();
   if (semanticActive && pending.length) {
     semanticCandidates = pending.length;
     const uncached: any[] = [];
     for (const entry of pending) {
+      const key = String(entry.item.external_id || entry.contentHash);
       const cached = await cachedSemantic(entry.item, entry.contentHash, settings);
       if (cached) {
         semanticCached += 1;
-        semanticById.set(String(entry.item.external_id || entry.contentHash), cached);
+        cachedSemanticIds.add(key);
+        semanticById.set(key, cached);
       } else uncached.push(entry);
     }
 
@@ -554,10 +565,18 @@ async function ingest(payload: any) {
 
   for (const entry of pending) {
     const { item, seen, dedupeKey } = entry;
+    const semanticKey = String(item.external_id || entry.contentHash);
     let assessment: PolicyAssessment = entry.assessment;
-    const semantic = semanticById.get(String(item.external_id || entry.contentHash)) || null;
-    let semanticDecision: SemanticDecision | null = semantic ? decideSemantic(semantic, settings) : null;
-    if (semantic && !semanticCached) await persistSemantic(item, entry.contentHash, settings, semantic, semanticDecision || "uncertain");
+    const semantic = semanticById.get(semanticKey) || null;
+    const semanticDecision: SemanticDecision | null = semantic ? decideSemantic(semantic, settings) : null;
+
+    if (semanticDecision === "accept") semanticAccepted += 1;
+    else if (semanticDecision === "reject") semanticRejected += 1;
+    else if (semanticDecision === "uncertain") semanticUncertain += 1;
+
+    if (semantic && !cachedSemanticIds.has(semanticKey)) {
+      await persistSemantic(item, entry.contentHash, settings, semantic, semanticDecision || "uncertain");
+    }
 
     let shouldStore = assessment.is_lead;
     let dispositionReason = "policy";
@@ -565,8 +584,6 @@ async function ingest(payload: any) {
       shouldStore = semanticDecision === "accept";
       dispositionReason = `semantic:${semanticDecision}`;
       if (semanticDecision === "accept") assessment = mergeAcceptedSemantic(assessment, semantic);
-      else if (semanticDecision === "reject") semanticRejected += 1;
-      else semanticUncertain += 1;
     } else if (settings.enabled && settings.mode === "shadow" && semantic) {
       dispositionReason = `semantic_shadow:${semanticDecision}`;
     } else if (settings.enabled && !semanticActive) {
@@ -585,7 +602,6 @@ async function ingest(payload: any) {
         semantic_decision: semanticDecision,
         intelligence: { route: dispositionReason },
       });
-      if (semantic) await persistSemantic(item, entry.contentHash, settings, semantic, semanticDecision || "uncertain");
       continue;
     }
 
@@ -606,7 +622,6 @@ async function ingest(payload: any) {
         intelligence: { route: dispositionReason },
         score: Number(lead.ai_score || 0),
       });
-      if (semantic) await persistSemantic(item, entry.contentHash, settings, semantic, semanticDecision || "accept");
     } catch (error) {
       await updateSeen(Number(seen.id), "error", null, assessment, semantic, semanticDecision);
       decisions.push({ external_id: item.external_id, disposition: "error", lead_id: null, error: String(error).slice(0, 300) });
@@ -623,6 +638,7 @@ async function ingest(payload: any) {
     semantic_candidates: semanticCandidates,
     semantic_calls: semanticCalls,
     semantic_cached: semanticCached,
+    semantic_accepted: semanticAccepted,
     semantic_rejected: semanticRejected,
     semantic_uncertain: semanticUncertain,
   };
@@ -633,7 +649,13 @@ async function ingest(payload: any) {
     policy_version: POLICY_VERSION,
     retrieval_version: RETRIEVAL_VERSION,
     intelligence_version: INTELLIGENCE_VERSION,
-    semantic: { enabled: settings.enabled, mode: settings.mode, provider_ready: providerReady(), model: settings.model },
+    semantic: {
+      enabled: settings.enabled,
+      mode: settings.mode,
+      provider: settings.provider,
+      provider_ready: providerReady(),
+      model: settings.model,
+    },
     ...counts,
     decisions,
   };
@@ -650,7 +672,13 @@ Deno.serve(async (request) => {
       policy_version: POLICY_VERSION,
       retrieval_version: RETRIEVAL_VERSION,
       intelligence_version: INTELLIGENCE_VERSION,
-      semantic: { enabled: settings.enabled, mode: settings.mode, provider_ready: providerReady(), model: settings.model },
+      semantic: {
+        enabled: settings.enabled,
+        mode: settings.mode,
+        provider: settings.provider,
+        provider_ready: providerReady(),
+        model: settings.model,
+      },
       auth: "server-to-server",
     });
   }
