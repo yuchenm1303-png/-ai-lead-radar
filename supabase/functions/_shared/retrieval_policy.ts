@@ -60,8 +60,11 @@ function lanePrior(lane: RetrievalLane) {
 }
 
 function queryTerms(topic: any): string[] {
+  const topicKey = String(topic?.key || "").trim();
+  const configured = retrievalPolicy.topic_terms?.[topicKey];
+  const source = Array.isArray(configured) ? configured : (topic?.query_terms || []);
   const result: string[] = [];
-  for (const raw of topic?.query_terms || []) {
+  for (const raw of source) {
     const value = String(raw || "").trim();
     if (value && !result.includes(value)) result.push(value);
   }
@@ -83,7 +86,9 @@ export function buildRetrievalPortfolio(): QuerySpec[] {
     for (const family of leadPolicy.intent_families || []) {
       const familyKey = String(family?.key || "").trim();
       const familyPrior = numberValue(family?.prior, 1);
-      const templates = (family?.query_templates || []).map(String).map((item: string) => item.trim()).filter(Boolean);
+      const configuredTemplates = retrievalPolicy.precision_templates?.[familyKey];
+      const templates = (Array.isArray(configuredTemplates) ? configuredTemplates : (family?.query_templates || []))
+        .map(String).map((item: string) => item.trim()).filter(Boolean);
       if (!familyKey || !templates.length) continue;
       terms.forEach((term, termIndex) => {
         templates.forEach((template: string, templateIndex: number) => {
