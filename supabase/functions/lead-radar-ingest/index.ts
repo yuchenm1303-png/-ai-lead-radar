@@ -73,10 +73,17 @@ function identity(item: any) {
 }
 
 async function findSeen(item: any, dedupeKey: string) {
+  const select = "id,disposition,lead_id,metadata";
   if (item.external_id) {
-    return await rest(`lead_radar_seen_items?source=eq.${encodeURIComponent(item.source)}&source_id=eq.${encodeURIComponent(item.external_id)}&select=id,disposition,lead_id&limit=1`);
+    return await rest(`lead_radar_seen_items?source=eq.${encodeURIComponent(item.source)}&source_id=eq.${encodeURIComponent(item.external_id)}&select=${select}&limit=1`);
   }
-  return await rest(`lead_radar_seen_items?dedupe_key=eq.${dedupeKey}&select=id,disposition,lead_id&limit=1`);
+  return await rest(`lead_radar_seen_items?dedupe_key=eq.${dedupeKey}&select=${select}&limit=1`);
+}
+
+function shouldReevaluateSeen(seen: any) {
+  if (!seen || String(seen.disposition || "") !== "filtered") return false;
+  const previousVersion = String(seen?.metadata?.policy_version || "legacy");
+  return previousVersion !== POLICY_VERSION;
 }
 
 async function createSeen(item: any, dedupeKey: string) {
@@ -229,18 +236,20 @@ async function ingest(payload: any) {
   const rawItems = Array.isArray(payload?.items) ? payload.items : [];
   const items = rawItems.map(normalizeItem).filter(Boolean).slice(0, 100);
   const decisions: any[] = [];
-  let stored = 0, filtered = 0, duplicates = 0, notified = 0;
+  let stored = 0, filtered = 0, duplicates = 0, notified = 0, reevaluated = 0;
   const leadIds: number[] = [];
 
   for (const item of items) {
     const dedupeKey = await sha256(identity(item));
     const existing = await findSeen(item, dedupeKey);
     const first = Array.isArray(existing) ? existing[0] : null;
-    if (first && String(first.disposition || "") !== "error") {
+    const reevaluate = shouldReevaluateSeen(first);
+    if (first && String(first.disposition || "") !== "error" && !reevaluate) {
       duplicates += 1;
       decisions.push({ external_id: item.external_id, disposition: "duplicate", lead_id: first.lead_id || null, assessment: null });
       continue;
     }
+    if (reevaluate) reevaluated += 1;
 
     const seen = first || await createSeen(item, dedupeKey);
     if (!seen?.id) throw new Error("failed to create seen item");
@@ -249,7 +258,7 @@ async function ingest(payload: any) {
       if (!assessment.is_lead) {
         filtered += 1;
         await updateSeen(Number(seen.id), "filtered", null, assessment);
-        decisions.push({ external_id: item.external_id, disposition: "filtered", lead_id: null, assessment });
+        decisions.push({ external_id: item.external_id, disposition: "filtered", lead_id: null, assessment, reevaluated: reevaluate });
         continue;
       }
 
@@ -259,14 +268,14 @@ async function ingest(payload: any) {
       leadIds.push(Number(lead.id));
       await updateSeen(Number(seen.id), "stored", Number(lead.id), assessment);
       if (await notifyLead(lead)) notified += 1;
-      decisions.push({ external_id: item.external_id, disposition: "stored", lead_id: Number(lead.id), assessment, score: Number(lead.ai_score || 0) });
+      decisions.push({ external_id: item.external_id, disposition: "stored", lead_id: Number(lead.id), assessment, score: Number(lead.ai_score || 0), reevaluated: reevaluate });
     } catch (error) {
       await updateSeen(Number(seen.id), "error", null, null);
-      decisions.push({ external_id: item.external_id, disposition: "error", lead_id: null, error: String(error).slice(0, 300) });
+      decisions.push({ external_id: item.external_id, disposition: "error", lead_id: null, error: String(error).slice(0, 300), reevaluated: reevaluate });
     }
   }
 
-  const counts = { received: items.length, stored, filtered, duplicates, notified, lead_ids: leadIds };
+  const counts = { received: items.length, stored, filtered, duplicates, reevaluated, notified, lead_ids: leadIds };
   await recordQueryMetric(payload?.query_context || null, counts);
   return { ok: true, policy_version: POLICY_VERSION, ...counts, decisions };
 }
