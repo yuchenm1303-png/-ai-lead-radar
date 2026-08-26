@@ -55,11 +55,13 @@ export function providerReady() {
 }
 
 export function hardGuardrail(assessment: PolicyAssessment): GuardrailResult {
-  if (!assessment.topic_hits.length) return { action: "reject", reason: "out_of_scope" };
   if (HARD_NEGATIVE_ROLES.has(assessment.actor_role) && assessment.confidence >= HARD_GUARDRAIL_CONFIDENCE) {
     return { action: "reject", reason: `hard_actor:${assessment.actor_role}` };
   }
-  return { action: "semantic", reason: "semantic_required" };
+  return {
+    action: "semantic",
+    reason: assessment.topic_hits.length ? "semantic_required" : "semantic_scope_check",
+  };
 }
 
 export function decideSemantic(assessment: SemanticAssessment, settings: IntelligenceSettings): SemanticDecision {
@@ -111,10 +113,11 @@ const RESPONSE_SCHEMA = {
 
 const SYSTEM_INSTRUCTIONS = `You are the buyer-intent classifier for a software-development lead radar.
 Classify the AUTHOR'S transaction role from the overall meaning, not by keyword overlap.
-A buyer is an author who wants to purchase, commission, outsource, hire a vendor/freelancer, or get someone else to build/modify software, a website, mini-program, app, automation, AI system, script, or data solution for the author's own real need.
+A buyer is an author who wants to commission, outsource, or hire a vendor/freelancer to build or modify software, a website, mini-program, app, automation, AI system, script, data solution, or a closely related custom digital product for the author's own real need.
 A provider is an author advertising development services, soliciting clients, showing cases, giving vendor-marketing advice, or saying they can build software for others.
-Recruitment for employees/interns is recruiter, not buyer. Learning/tutorial/resource sharing is learner/content. General troubleshooting of an existing third-party website/app is not a software-development purchase unless the author is explicitly seeking paid/custom development help.
+Recruitment for employees/interns is recruiter, not buyer. Learning/tutorial/resource sharing is learner/content. General troubleshooting of an existing third-party website/app is not a software-development purchase unless the author is explicitly seeking custom development help.
 Do not call something a buyer merely because it contains phrases such as 找开发, 求助, 小程序开发, 网站, 外包, or 报价. Determine who is buying from whom.
+The buyer_probability field means the probability that this post represents demand for CUSTOM SOFTWARE/DEVELOPMENT SERVICES, not merely that the author is buying any product or service.
 Examples:
 - 寻找杭州本地小程序开发的公司或者个人；公司有数字化升级需求 => buyer / buy.
 - 小程序接定制开发；全行业都能做；需要的可以说需求 => provider / sell.
