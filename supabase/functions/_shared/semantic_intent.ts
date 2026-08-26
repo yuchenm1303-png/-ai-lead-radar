@@ -42,6 +42,7 @@ export interface GuardrailResult {
 }
 
 const HARD_NEGATIVE_ROLES = new Set<ActorRole>(["provider", "recruiter", "learner", "content"]);
+const HARD_GUARDRAIL_CONFIDENCE = 90;
 
 function clamp(value: unknown, min = 0, max = 100, fallback = 0) {
   const number = Number(value);
@@ -55,7 +56,7 @@ export function providerReady() {
 
 export function hardGuardrail(assessment: PolicyAssessment): GuardrailResult {
   if (!assessment.topic_hits.length) return { action: "reject", reason: "out_of_scope" };
-  if (HARD_NEGATIVE_ROLES.has(assessment.actor_role)) {
+  if (HARD_NEGATIVE_ROLES.has(assessment.actor_role) && assessment.confidence >= HARD_GUARDRAIL_CONFIDENCE) {
     return { action: "reject", reason: `hard_actor:${assessment.actor_role}` };
   }
   return { action: "semantic", reason: "semantic_required" };
@@ -96,8 +97,8 @@ const RESPONSE_SCHEMA = {
           buyer_probability: { type: "integer", minimum: 0, maximum: 100 },
           confidence: { type: "integer", minimum: 0, maximum: 100 },
           project_specificity: { type: "integer", minimum: 0, maximum: 100 },
-          reason: { type: "string", maxLength: 220 },
-          evidence: { type: "array", items: { type: "string", maxLength: 100 }, maxItems: 4 },
+          reason: { type: "string" },
+          evidence: { type: "array", items: { type: "string" } },
         },
         required: ["id", "actor_role", "transaction_direction", "buyer_probability", "confidence", "project_specificity", "reason", "evidence"],
         additionalProperties: false,
@@ -118,7 +119,7 @@ Examples:
 - 寻找杭州本地小程序开发的公司或者个人；公司有数字化升级需求 => buyer / buy.
 - 小程序接定制开发；全行业都能做；需要的可以说需求 => provider / sell.
 - 求助：学校网站怎么填写；某网站打不开；网页游戏求助 => unknown/content / discuss, not buyer.
-Return one result for every input id. Keep reasons short and evidence grounded in the text.`;
+Return one result for every input id. Keep reasons short and evidence grounded in the text. Evidence should contain at most four short phrases.`;
 
 export function buildSemanticRequest(candidates: SemanticCandidate[], model: string) {
   const input = candidates.map((item) => ({
