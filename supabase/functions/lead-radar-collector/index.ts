@@ -1,4 +1,5 @@
 import { POLICY_VERSION } from "../_shared/lead_policy.ts";
+import { chooseQueries, RETRIEVAL_VERSION, type QueryMetric } from "../_shared/retrieval_policy.ts";
 
 const SB_URL = Deno.env.get("SUPABASE_URL") || "";
 const LEGACY_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
@@ -86,33 +87,100 @@ async function verifyGithubOidc(req: Request) {
   return claims;
 }
 
-function cleanQueries(value: unknown) {
-  if (!Array.isArray(value)) return [];
-  return value.slice(0, 6).map((item) => ({
+function metricFromRow(row: any): QueryMetric {
+  return {
+    runs: Number(row?.runs || 0),
+    api_calls: Number(row?.api_calls || row?.runs || 0),
+    returned_count: Number(row?.returned_count || 0),
+    fresh_count: Number(row?.fresh_count || 0),
+    qualified_count: Number(row?.qualified_count || 0),
+    filtered_count: Number(row?.filtered_count || 0),
+    duplicate_count: Number(row?.duplicate_count || 0),
+    human_positive_count: Number(row?.human_positive_count || 0),
+    human_negative_count: Number(row?.human_negative_count || 0),
+    last_run_at: row?.last_run_at || null,
+  };
+}
+
+async function queryMetrics(): Promise<Record<string, QueryMetric>> {
+  const result: Record<string, QueryMetric> = {};
+  try {
+    const rows = await rest("lead_radar_query_scheduler_stats?select=query_key,runs,api_calls,returned_count,fresh_count,qualified_count,filtered_count,duplicate_count,human_positive_count,human_negative_count,last_run_at&limit=1000");
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const key = String(row?.query_key || "");
+      if (key) result[key] = metricFromRow(row);
+    }
+  } catch (error) {
+    console.warn("retrieval scheduler stats unavailable", String(error));
+  }
+  try {
+    const rows = await rest("lead_radar_query_metrics?select=query_key,runs,returned_count,fresh_count,qualified_count,filtered_count,duplicate_count,last_run_at&limit=1000");
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const key = String(row?.query_key || "");
+      if (key && !result[key]) result[key] = metricFromRow(row);
+    }
+  } catch {}
+  return result;
+}
+
+function cleanQuery(item: any) {
+  return {
     key: String(item?.key || "").slice(0, 160),
     keyword: String(item?.keyword || "").slice(0, 240),
     category: String(item?.category || "").slice(0, 80),
+    lane: String(item?.lane || "precision").slice(0, 40),
     intent_family: String(item?.intent_family || "").slice(0, 80),
     topic_family: String(item?.topic_family || "").slice(0, 80),
-    raw_count: Math.max(0, Math.min(500, Number(item?.raw_count || 0))),
-    normalized_count: Math.max(0, Math.min(500, Number(item?.normalized_count || 0))),
-    fresh_count: Math.max(0, Math.min(500, Number(item?.fresh_count || 0))),
-    request_id: item?.request_id ? String(item.request_id).slice(0, 160) : null,
-  }));
+    raw_count: Math.max(0, Math.min(1000, Number(item?.raw_count || 0))),
+    normalized_count: Math.max(0, Math.min(1000, Number(item?.normalized_count || 0))),
+    fresh_count: Math.max(0, Math.min(1000, Number(item?.fresh_count || 0))),
+    pages: Math.max(0, Math.min(6, Number(item?.pages || 1))),
+    api_calls: Math.max(0, Math.min(12, Number(item?.api_calls || 1))),
+    request_ids: Array.isArray(item?.request_ids) ? item.request_ids.slice(0, 6).map((value: unknown) => String(value).slice(0, 160)) : [],
+    newest_published_at: item?.newest_published_at || null,
+    oldest_published_at: item?.oldest_published_at || null,
+    started_at: item?.started_at || null,
+  };
 }
 
-async function claimScanRequest(claims: Record<string, unknown>) {
-  const rows = await rest("rpc/lead_radar_claim_scan_request", {
+function cleanQueries(value: unknown) {
+  return Array.isArray(value) ? value.slice(0, 6).map(cleanQuery).filter((item) => item.key && item.keyword) : [];
+}
+
+async function claimScanRequest(claims: Record<string, unknown>, allowAuto: boolean) {
+  const rows = await rest("rpc/lead_radar_claim_scan_work", {
     method: "POST",
-    body: JSON.stringify({ p_run_id: String(claims.run_id || "").slice(0, 120) }),
+    body: JSON.stringify({
+      p_run_id: String(claims.run_id || "").slice(0, 120),
+      p_allow_auto: Boolean(allowAuto),
+    }),
   });
   const row = Array.isArray(rows) ? rows[0] : null;
   if (!row) return null;
+  const maxQueries = Math.max(1, Math.min(3, Number(row.max_queries || 1)));
+  const providerCallBudget = Math.max(1, Math.min(6, Number(row.provider_call_budget || maxQueries)));
+  const metrics = await queryMetrics();
+  const queries = chooseQueries({
+    override: row.query_override ? String(row.query_override).slice(0, 120) : null,
+    count: Math.min(maxQueries, providerCallBudget),
+    metrics,
+  }).map((spec) => ({
+    key: spec.key,
+    keyword: spec.keyword,
+    category: spec.category,
+    lane: spec.lane,
+    intent_family: spec.intent_family,
+    topic_family: spec.topic_family,
+  }));
   return {
     id: Number(row.id),
     query_override: row.query_override ? String(row.query_override).slice(0, 120) : null,
-    max_queries: Math.max(1, Math.min(3, Number(row.max_queries || 1))),
+    max_queries: maxQueries,
     requested_at: row.requested_at || null,
+    requested_from: String(row.requested_from || "web").slice(0, 40),
+    provider_call_budget: providerCallBudget,
+    retrieval_version: RETRIEVAL_VERSION,
+    queries,
   };
 }
 
@@ -136,21 +204,30 @@ async function recordRun(payload: Record<string, unknown>) {
   }
 }
 
-async function ingest(items: any[], queries: ReturnType<typeof cleanQueries>) {
-  const first = queries[0] || null;
+async function ingestBatch(connector: string, scanRequestId: number | null, query: ReturnType<typeof cleanQuery>, items: any[]) {
   const response = await fetch(`${SB_URL}/functions/v1/lead-radar-ingest/api/v1/ingest`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json", apikey: SECRET_KEY, Authorization: `Bearer ${SECRET_KEY}` },
     body: JSON.stringify({
       items,
-      query_context: first ? {
-        query_key: first.key,
-        query_text: first.keyword,
-        intent_family: first.intent_family,
-        topic_family: first.topic_family,
-        returned_count: first.raw_count,
-        fresh_count: first.fresh_count,
-      } : null,
+      query_context: {
+        scan_request_id: scanRequestId,
+        provider: connector,
+        retrieval_version: RETRIEVAL_VERSION,
+        query_key: query.key,
+        query_text: query.keyword,
+        lane: query.lane,
+        intent_family: query.intent_family,
+        topic_family: query.topic_family,
+        started_at: query.started_at || new Date().toISOString(),
+        pages: query.pages,
+        api_calls: query.api_calls,
+        returned_count: query.raw_count,
+        normalized_count: query.normalized_count,
+        fresh_count: query.fresh_count,
+        newest_published_at: query.newest_published_at,
+        oldest_published_at: query.oldest_published_at,
+      },
     }),
     signal: AbortSignal.timeout(30000),
   });
@@ -166,12 +243,13 @@ Deno.serve(async (req) => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^.*\/lead-radar-collector/, "") || "/";
     if (req.method === "GET" && path === "/health") {
-      return json({ ok: true, service: "lead-radar-collector", auth: "github-actions-oidc", policy_version: POLICY_VERSION });
+      return json({ ok: true, service: "lead-radar-collector", auth: "github-actions-oidc", policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION });
     }
 
     if (req.method === "POST" && path === "/api/v1/scan/claim") {
       const claims = await verifyGithubOidc(req);
-      const claimed = await claimScanRequest(claims);
+      const body = await req.json().catch(() => ({}));
+      const claimed = await claimScanRequest(claims, Boolean(body?.allow_auto));
       return json(claimed ? { ok: true, claimed: true, request: claimed } : { ok: true, claimed: false });
     }
 
@@ -181,7 +259,7 @@ Deno.serve(async (req) => {
       const id = Number(body?.scan_request_id || 0);
       if (!Number.isInteger(id) || id <= 0) return json({ detail: "scan_request_id required" }, 422);
       const message = String(body?.error || "collector failed").slice(0, 700);
-      await updateScanRequest(id, "failed", { failed_by: "collector", policy_version: POLICY_VERSION }, message);
+      await updateScanRequest(id, "failed", { failed_by: "collector", policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION }, message);
       return json({ ok: true });
     }
 
@@ -191,23 +269,57 @@ Deno.serve(async (req) => {
     const connector = String(body?.connector || "justone-xiaohongshu-v4").slice(0, 120);
     const scanRequestId = Number.isInteger(Number(body?.scan_request_id)) && Number(body.scan_request_id) > 0 ? Number(body.scan_request_id) : null;
     const startedAt = Number.isFinite(new Date(body?.started_at || "").getTime()) ? new Date(body.started_at).toISOString() : new Date().toISOString();
-    const scanned = Math.max(0, Math.min(2000, Number(body?.scanned || 0)));
-    const queries = cleanQueries(body?.queries);
-    const items = Array.isArray(body?.items) ? body.items.slice(0, 200) : [];
-    const ingestion = await ingest(items, queries);
-    const highIntent = (Array.isArray(ingestion?.decisions) ? ingestion.decisions : []).filter((item: any) => item?.disposition === "stored" && Number(item?.score || 0) >= 85).length;
+
+    let batches: { query: ReturnType<typeof cleanQuery>; items: any[] }[] = [];
+    if (Array.isArray(body?.batches)) {
+      batches = body.batches.slice(0, 6).map((batch: any) => ({
+        query: cleanQuery(batch?.query || {}),
+        items: Array.isArray(batch?.items) ? batch.items.slice(0, 100) : [],
+      })).filter((batch: any) => batch.query.key && batch.query.keyword);
+    } else {
+      const queries = cleanQueries(body?.queries);
+      if (queries[0]) batches = [{ query: queries[0], items: Array.isArray(body?.items) ? body.items.slice(0, 100) : [] }];
+    }
+    if (!batches.length) throw new Error("collector payload contains no query batches");
+
+    let stored = 0, filtered = 0, duplicates = 0, notified = 0, highIntent = 0;
+    const leadIds = new Set<number>();
+    const queryResults: any[] = [];
+    for (const batch of batches) {
+      const ingestion = await ingestBatch(connector, scanRequestId, batch.query, batch.items);
+      stored += Number(ingestion?.stored || 0);
+      filtered += Number(ingestion?.filtered || 0);
+      duplicates += Number(ingestion?.duplicates || 0);
+      notified += Number(ingestion?.notified || 0);
+      for (const leadId of Array.isArray(ingestion?.lead_ids) ? ingestion.lead_ids : []) {
+        if (Number.isInteger(Number(leadId)) && Number(leadId) > 0) leadIds.add(Number(leadId));
+      }
+      highIntent += (Array.isArray(ingestion?.decisions) ? ingestion.decisions : []).filter((item: any) => item?.disposition === "stored" && Number(item?.score || 0) >= 85).length;
+      queryResults.push({
+        ...batch.query,
+        stored: Number(ingestion?.stored || 0),
+        filtered: Number(ingestion?.filtered || 0),
+        duplicates: Number(ingestion?.duplicates || 0),
+      });
+    }
+
     const finishedAt = new Date().toISOString();
+    const scanned = batches.reduce((sum, batch) => sum + Number(batch.query.raw_count || 0), 0);
+    const fresh = new Set(batches.flatMap((batch) => batch.items.map((item: any) => `${String(item?.source || "")}|${String(item?.external_id || item?.url || "")}`))).size;
     const result = {
       connector,
-      policy_version: ingestion?.policy_version || POLICY_VERSION,
-      scanned: scanned || items.length,
-      stored: Number(ingestion?.stored || 0),
-      filtered: Number(ingestion?.filtered || 0),
-      duplicates: Number(ingestion?.duplicates || 0),
-      notified: Number(ingestion?.notified || 0),
+      policy_version: POLICY_VERSION,
+      retrieval_version: RETRIEVAL_VERSION,
+      scanned,
+      fresh,
+      stored,
+      filtered,
+      duplicates,
+      notified,
       high_intent: highIntent,
-      lead_ids: Array.isArray(ingestion?.lead_ids) ? ingestion.lead_ids : [],
-      queries,
+      lead_ids: [...leadIds],
+      queries: queryResults,
+      provider_calls: batches.reduce((sum, batch) => sum + Number(batch.query.api_calls || 0), 0),
       last_scan_at: finishedAt,
     };
     await recordRun({
@@ -220,11 +332,11 @@ Deno.serve(async (req) => {
       high_intent: highIntent,
       status: "success",
       error_text: null,
-      details: { queries, policy_version: result.policy_version, received: Number(ingestion?.received || items.length) },
+      details: { mode: "retrieval-v2-collector", queries: queryResults, policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION, provider_calls: result.provider_calls },
     });
     if (scanRequestId) await updateScanRequest(scanRequestId, "success", result, null);
     return json({ ok: true, ...result, runtime_ms: Date.now() - new Date(startedAt).getTime() });
   } catch (error) {
-    return json({ detail: String(error).slice(0, 500), policy_version: POLICY_VERSION }, 500);
+    return json({ detail: String(error).slice(0, 500), policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION }, 500);
   }
 });
