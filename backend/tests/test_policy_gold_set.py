@@ -2,7 +2,7 @@ import json
 import unittest
 
 from app.domain import ActorRole
-from app.policy import POLICY_PATH, assess_text, evaluate_gold_set, load_policy
+from app.policy import POLICY_PATH, assess_text, evaluate_gold_set
 from app.query_engine import QUERY_SPECS
 
 GOLD_PATH = POLICY_PATH.with_name("gold_set.json")
@@ -52,19 +52,16 @@ class PolicyGoldSetTests(unittest.TestCase):
         self.assertEqual(assessment.actor_role, ActorRole.BUYER)
         self.assertGreaterEqual(assessment.intent_score, 85)
 
-    def test_query_portfolio_has_no_bare_topic_queries(self):
-        policy = load_policy()
-        bare_terms = {
-            str(term).strip().lower()
-            for topic in policy.get("topics", [])
-            for term in topic.get("query_terms", [])
-            if str(term).strip()
-        }
-        self.assertGreater(len(QUERY_SPECS), 10)
-        for spec in QUERY_SPECS:
-            self.assertNotIn(spec.keyword.strip().lower(), bare_terms, spec)
-            self.assertNotEqual(spec.intent_family, "")
-            self.assertNotEqual(spec.topic_family, "")
+    def test_retrieval_portfolio_contains_precision_discovery_and_aliases(self):
+        lanes = {spec.lane for spec in QUERY_SPECS}
+        keywords = {spec.keyword.lower() for spec in QUERY_SPECS}
+        self.assertGreater(len(QUERY_SPECS), 50)
+        self.assertTrue({"precision", "discovery", "broad"}.issubset(lanes))
+        self.assertTrue(any("微信小程序" in keyword for keyword in keywords))
+        self.assertTrue(any("官网" in keyword for keyword in keywords))
+        self.assertTrue(any("脚本" in keyword for keyword in keywords))
+        self.assertIn("网站", keywords)
+        self.assertIn("小程序", keywords)
 
 
 if __name__ == "__main__":
