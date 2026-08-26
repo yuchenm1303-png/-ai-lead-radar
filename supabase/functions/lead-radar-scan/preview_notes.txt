@@ -1,0 +1,1 @@
+Full public post previews are stored in the scan request result so quality review does not require a second provider request.
