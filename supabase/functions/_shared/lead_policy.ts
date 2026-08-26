@@ -46,13 +46,13 @@ function normalizedText(title: string, excerpt = "") {
   return `${title || ""} ${excerpt || ""}`.trim().toLowerCase();
 }
 
-function matchedTopics(text: string) {
+function matchedTopics(text: string): any[] {
   return (policy.topics || []).filter((topic: any) =>
     (topic.terms || []).some((term: unknown) => text.includes(String(term).toLowerCase()))
   );
 }
 
-function matchedIntents(text: string) {
+function matchedIntents(text: string): any[] {
   return (policy.intent_families || []).filter((family: any) =>
     (family.terms || []).some((term: unknown) => text.includes(String(term).toLowerCase()))
   );
@@ -124,15 +124,15 @@ export function assessText(title: string, excerpt = ""): PolicyAssessment {
   } else if (role !== "unknown") actionability = 5;
 
   const isLead = role === "buyer" && topics.length > 0 && intentScore >= 55 && actionability >= 70;
-  const topicHits = topics.map((item: any) => String(item.key));
-  const intentHits = intents.map((item: any) => String(item.key));
+  const topicHits: string[] = topics.map((item: any) => String(item.key));
+  const intentHits: string[] = intents.map((item: any) => String(item.key));
   const category = topics.length ? String(topics[0].category) : "其他开发";
   const reasonCodes: string[] = [role === "buyer" ? "actor:buyer" : `actor:${role}`];
   if (directBuyer) reasonCodes.push("intent:direct_buyer");
   if (explicitDirect) reasonCodes.push("intent:explicit_search_language");
-  reasonCodes.push(...intentHits.map((key) => `intent:${key}`));
-  reasonCodes.push(...topicHits.map((key) => `topic:${key}`));
-  reasonCodes.push(...actor.labels.map((label) => `exclude:${label}`));
+  reasonCodes.push(...intentHits.map((key: string) => `intent:${key}`));
+  reasonCodes.push(...topicHits.map((key: string) => `topic:${key}`));
+  reasonCodes.push(...actor.labels.map((label: string) => `exclude:${label}`));
 
   let confidence = 54 + (role === "buyer" ? 18 : 0) + (directBuyer ? 12 : 0);
   confidence += Math.min(12, intentHits.length * 4) + Math.min(9, topicHits.length * 3);
@@ -152,7 +152,7 @@ export function assessText(title: string, excerpt = ""): PolicyAssessment {
     actionability_score: Math.max(0, Math.min(100, actionability)),
     confidence: Math.max(0, Math.min(99, confidence)),
     reason_codes: reasonCodes,
-    evidence: [...new Set([...(role === "buyer" ? ["明确需求方表达"] : []), ...actor.evidence, ...intentHits.slice(0, 4), ...topicHits.slice(0, 3)])].slice(0, 8),
+    evidence: [...new Set<string>([...(role === "buyer" ? ["明确需求方表达"] : []), ...actor.evidence, ...intentHits.slice(0, 4), ...topicHits.slice(0, 3)])].slice(0, 8),
   };
 }
 
@@ -193,11 +193,7 @@ export function queryUcbScore(spec: QuerySpec, metric: QueryMetric, totalRuns: n
   return spec.prior * (precision + exploration * explore);
 }
 
-export function chooseQuery(options: {
-  now?: Date;
-  metrics?: Record<string, QueryMetric>;
-  override?: string | null;
-} = {}): QuerySpec {
+export function chooseQuery(options: { now?: Date; metrics?: Record<string, QueryMetric>; override?: string | null } = {}): QuerySpec {
   if (options.override?.trim()) {
     return { key: "manual", keyword: options.override.trim(), category: "manual", intent_family: "manual", topic_family: "manual", prior: 1 };
   }
