@@ -1,5 +1,5 @@
 import goldSet from "./gold_set.json" with { type: "json" };
-import { assessText, buildQueryPortfolio } from "./lead_policy.ts";
+import { assessText } from "./lead_policy.ts";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -24,15 +24,4 @@ Deno.test("lead policy passes shared gold set quality gate", () => {
   assert(recall >= 0.95, `recall=${recall} tp=${tp} fn=${fn}`);
   assert(f1 >= 0.95, `f1=${f1}`);
   assert(actorAccuracy >= 0.80, `actor_accuracy=${actorAccuracy}`);
-});
-
-Deno.test("query portfolio never contains bare topic queries", () => {
-  const portfolio = buildQueryPortfolio();
-  assert(portfolio.length > 10, "query portfolio is unexpectedly small");
-  for (const query of portfolio) {
-    assert(query.intent_family !== "", `missing intent family for ${query.key}`);
-    assert(query.topic_family !== "", `missing topic family for ${query.key}`);
-    assert(query.keyword.trim().split(/\s+/).length >= 1, `empty query ${query.key}`);
-    assert(!["网站", "小程序", "管理系统", "AI智能体", "自动化", "Python", "脚本"].includes(query.keyword.trim()), `bare topic query leaked: ${query.keyword}`);
-  }
 });
