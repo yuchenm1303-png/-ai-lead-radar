@@ -1,0 +1,23 @@
+[
+  {"id":"p1","label":"lead","actor_role":"buyer","title":"学校比赛需要做个网站，有偿","excerpt":"预算可以聊，想尽快上线"},
+  {"id":"p2","label":"lead","actor_role":"buyer","title":"寻找AI智能体开发团队或个人，要求产品做成网页端登录使用","excerpt":"围绕社交媒体寻找潜在客户并推送，其他细节进一步沟通"},
+  {"id":"p3","label":"lead","actor_role":"buyer","title":"急！需要icp+edi，小程序，知识付费，在线交易","excerpt":"其他细节可以沟通"},
+  {"id":"p4","label":"lead","actor_role":"buyer","title":"找人开发在线课程网站","excerpt":"需要后台、登录和内容管理，预算可聊"},
+  {"id":"p5","label":"lead","actor_role":"buyer","title":"有没有人会做微信小程序，有偿","excerpt":"预约系统，比较急"},
+  {"id":"p6","label":"lead","actor_role":"buyer","title":"公司找开发做官网","excerpt":"有偿，尽快，需要中英文页面"},
+  {"id":"p7","label":"lead","actor_role":"buyer","title":"现有管理系统想二开，有人能做吗","excerpt":"需要改权限和报表功能，价格可聊"},
+  {"id":"p8","label":"lead","actor_role":"buyer","title":"想做一个自动化工作流","excerpt":"有没有会做的，预算面议"},
+
+  {"id":"n1","label":"not_lead","actor_role":"recruiter","title":"海大有同学找实习吗？网站开发实习生","excerpt":"公司在学校旁边，主要工作是网站开发"},
+  {"id":"n2","label":"not_lead","actor_role":"content","title":"这个网站我愿意称之为本年度最伟大的发明！！","excerpt":"#代码 #python #程序员 #免费学习资源网站 #网站推荐"},
+  {"id":"n3","label":"not_lead","actor_role":"content","title":"30 个离谱 AI 网站，看起来像开挂","excerpt":"最近整理了一批超好用的 AI 工具网站，很多功能第一次看到"},
+  {"id":"n4","label":"not_lead","actor_role":"content","title":"朋友推荐的AI网站，我真拿来做陶瓷了","excerpt":"分享一个做陶瓷设计的AI网站"},
+  {"id":"n5","label":"not_lead","actor_role":"content","title":"我愿称这个网站为年度最佳发明","excerpt":"有趣的网站、python、计算机、学习网站、编程"},
+  {"id":"n6","label":"not_lead","actor_role":"provider","title":"UI 接单｜中医门诊预约挂号小程序","excerpt":"可承接UI设计和小程序页面，欢迎咨询"},
+  {"id":"n7","label":"not_lead","actor_role":"provider","title":"外贸独立站建设英文官网开发多语言网站","excerpt":"提供定制开发服务，成品交付，售后无忧"},
+  {"id":"n8","label":"not_lead","actor_role":"provider","title":"专业网站建设，企业官网定制开发","excerpt":"本团队专注网站开发多年，可承接企业官网、独立站和管理系统"},
+  {"id":"n9","label":"not_lead","actor_role":"learner","title":"寻找适合学习AI开发的课程","excerpt":"推荐一下零基础入门路线"},
+  {"id":"n10","label":"not_lead","actor_role":"content","title":"文科生也能自制小程序","excerpt":"分享我的制作过程和开发教程"},
+  {"id":"n11","label":"not_lead","actor_role":"content","title":"TikTok短剧minis小程序入驻操作","excerpt":"完整操作教程和注意事项"},
+  {"id":"n12","label":"not_lead","actor_role":"content","title":"很多老板以为网站做完上线就一劳永逸了","excerpt":"帮朋友梳理公司官网年度预算，顺手拆解网站维护成本"}
+]

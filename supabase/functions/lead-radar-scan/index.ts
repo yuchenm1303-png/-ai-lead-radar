@@ -1,3 +1,5 @@
+import { chooseQuery, POLICY_VERSION, type QueryMetric, type QuerySpec } from "../_shared/lead_policy.ts";
+
 const ALLOWED = new Set(["https://smirel.com", "http://localhost:3000"]);
 const SB_URL = Deno.env.get("SUPABASE_URL") || "";
 const LEGACY_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
@@ -6,7 +8,6 @@ try {
   const keys = JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS") || "{}");
   SECRET_KEY = keys.default || SECRET_KEY;
 } catch {}
-
 const JUSTONE_TOKEN = (Deno.env.get("JUSTONE_API_TOKEN") || "").trim();
 const JUSTONE_ENDPOINT = (Deno.env.get("JUSTONE_API_ENDPOINT") || "https://api.justoneapi.com/api/xiaohongshu/search-note/v4").trim();
 const MAX_REQUESTS_PER_HOUR = 3;
@@ -14,7 +15,6 @@ const MIN_REQUEST_GAP_MS = 5 * 60 * 1000;
 const MAX_AGE_MINUTES = 24 * 60;
 const MAX_PREVIEW_BODY_CHARS = 12000;
 const MAX_PREVIEW_IMAGES = 9;
-const QUERY_ROTATION = ["小程序", "小程序", "小程序", "网站", "网站", "管理系统", "AI智能体", "软件开发", "自动化"];
 
 function cors(origin = "") {
   return {
@@ -26,10 +26,7 @@ function cors(origin = "") {
 }
 
 function json(data: unknown, status = 200, origin = "") {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json; charset=utf-8", ...cors(origin) },
-  });
+  return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json; charset=utf-8", ...cors(origin) } });
 }
 
 function restHeaders(extra: Record<string, string> = {}) {
@@ -76,16 +73,29 @@ function requestWindow(requests: any[]) {
   const latestAt = latest ? new Date(latest.requested_at || 0).getTime() : 0;
   const cooldownMs = latestAt ? Math.max(0, MIN_REQUEST_GAP_MS - (now - latestAt)) : 0;
   return {
-    recent,
     recentCount: recent.length,
     cooldownSeconds: Math.ceil(cooldownMs / 1000),
     nextAvailableAt: cooldownMs > 0 ? new Date(now + cooldownMs).toISOString() : null,
   };
 }
 
-function chooseKeyword(now = new Date()) {
-  const bucket = Math.floor(now.getTime() / (15 * 60 * 1000));
-  return QUERY_ROTATION[bucket % QUERY_ROTATION.length];
+async function queryMetrics(): Promise<Record<string, QueryMetric>> {
+  try {
+    const rows = await rest("lead_radar_query_metrics?select=query_key,runs,fresh_count,qualified_count&limit=500");
+    const result: Record<string, QueryMetric> = {};
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const key = String(row?.query_key || "");
+      if (!key) continue;
+      result[key] = {
+        runs: Number(row?.runs || 0),
+        fresh_count: Number(row?.fresh_count || 0),
+        qualified_count: Number(row?.qualified_count || 0),
+      };
+    }
+    return result;
+  } catch {
+    return {};
+  }
 }
 
 function parseTimestamp(value: unknown): Date | null {
@@ -119,7 +129,7 @@ function safeHttpUrl(value: unknown): string | null {
   }
 }
 
-function firstText(object: any, keys: string[]): string {
+function firstText(object: any, keys: string[]) {
   if (!object || typeof object !== "object") return "";
   for (const key of keys) {
     const value = object[key];
@@ -195,25 +205,23 @@ function buildPreview(note: any, id: string, title: string, body: string, publis
   };
 }
 
-async function fetchJustOne(keyword: string) {
+async function fetchJustOne(spec: QuerySpec) {
   if (!JUSTONE_TOKEN) throw new Error("JUSTONE_API_TOKEN is not configured");
   const url = new URL(JUSTONE_ENDPOINT);
   url.searchParams.set("token", JUSTONE_TOKEN);
-  url.searchParams.set("keyword", keyword);
+  url.searchParams.set("keyword", spec.keyword);
   url.searchParams.set("page", "1");
   url.searchParams.set("sortType", "time_descending");
   url.searchParams.set("noteType", "ALL");
   url.searchParams.set("timeFilter", "ALL");
-
   const response = await fetch(url, {
-    headers: { Accept: "application/json", "User-Agent": "AI-Lead-Radar/1.0" },
+    headers: { Accept: "application/json", "User-Agent": "AI-Lead-Radar/2.0" },
     signal: AbortSignal.timeout(20000),
   });
   const text = await response.text();
   if (!response.ok) throw new Error(`Just One HTTP ${response.status}: ${text.slice(0, 200)}`);
   let payload: any;
-  try { payload = JSON.parse(text); }
-  catch { throw new Error("Just One returned invalid JSON"); }
+  try { payload = JSON.parse(text); } catch { throw new Error("Just One returned invalid JSON"); }
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Just One returned a non-object response");
   if (payload.code !== 0) throw new Error(`Just One business code ${String(payload.code)}: ${String(payload.message || payload.msg || "business error").slice(0, 180)}`);
 
@@ -244,7 +252,6 @@ async function fetchJustOne(keyword: string) {
     });
   }
   return {
-    keyword,
     raw_count: notes.length,
     fresh_count: unique.size,
     request_id: payload.requestId ? String(payload.requestId).slice(0, 160) : null,
@@ -253,42 +260,36 @@ async function fetchJustOne(keyword: string) {
   };
 }
 
-async function ingestItems(items: any[]) {
-  if (!items.length) return { received: 0, stored: 0, filtered: 0, duplicates: 0, notified: 0, lead_ids: [] };
-  const response = await fetch(`${SB_URL}/functions/v1/lead-radar-api/api/v1/ingest/manual`, {
+async function ingestItems(items: any[], spec: QuerySpec, source: any) {
+  if (!items.length) {
+    return { ok: true, received: 0, stored: 0, filtered: 0, duplicates: 0, notified: 0, lead_ids: [], decisions: [], policy_version: POLICY_VERSION };
+  }
+  const response = await fetch(`${SB_URL}/functions/v1/lead-radar-ingest/api/v1/ingest`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json", Origin: "https://smirel.com" },
-    body: JSON.stringify({ items }),
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      apikey: SECRET_KEY,
+      Authorization: `Bearer ${SECRET_KEY}`,
+    },
+    body: JSON.stringify({
+      items,
+      query_context: {
+        query_key: spec.key,
+        query_text: spec.keyword,
+        intent_family: spec.intent_family,
+        topic_family: spec.topic_family,
+        returned_count: source.raw_count,
+        fresh_count: source.fresh_count,
+      },
+    }),
     signal: AbortSignal.timeout(30000),
   });
   const text = await response.text();
   let payload: any = {};
-  try { payload = text ? JSON.parse(text) : {}; }
-  catch { payload = { detail: text.slice(0, 200) }; }
-  if (!response.ok) throw new Error(`lead-radar-api ${response.status}: ${String(payload.detail || text).slice(0, 220)}`);
+  try { payload = text ? JSON.parse(text) : {}; } catch { payload = { detail: text.slice(0, 200) }; }
+  if (!response.ok) throw new Error(`lead-radar-ingest ${response.status}: ${String(payload.detail || text).slice(0, 220)}`);
   return payload;
-}
-
-async function candidateDecisions(items: any[]) {
-  const ids = items.map((item) => String(item?.external_id || "").trim()).filter(Boolean).slice(0, 100);
-  if (!ids.length) return new Map<string, { disposition: string; lead_id: number | null }>();
-  const rows = await rest(`lead_radar_seen_items?source=eq.${encodeURIComponent("小红书")}&source_id=in.(${ids.join(",")})&select=source_id,disposition,lead_id`);
-  const result = new Map<string, { disposition: string; lead_id: number | null }>();
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const sourceId = String(row?.source_id || "");
-    if (!sourceId) continue;
-    result.set(sourceId, {
-      disposition: String(row?.disposition || "seen"),
-      lead_id: Number.isInteger(Number(row?.lead_id)) ? Number(row.lead_id) : null,
-    });
-  }
-  return result;
-}
-
-async function highIntentCount(leadIds: number[]) {
-  if (!leadIds.length) return 0;
-  const rows = await rest(`lead_radar_leads?id=in.(${leadIds.join(",")})&select=id,ai_score`);
-  return Array.isArray(rows) ? rows.filter((row: any) => Number(row?.ai_score || 0) >= 80).length : 0;
 }
 
 async function updateRequest(id: number, values: Record<string, unknown>) {
@@ -311,67 +312,75 @@ async function recordRun(payload: Record<string, unknown>) {
   }
 }
 
+function decoratePosts(previews: any[], decisions: any[]) {
+  const byId = new Map<string, any>();
+  for (const decision of Array.isArray(decisions) ? decisions : []) {
+    const id = String(decision?.external_id || "");
+    if (id) byId.set(id, decision);
+  }
+  return previews.map((preview) => {
+    const decision = byId.get(String(preview.id)) || null;
+    const disposition = String(decision?.disposition || "unknown");
+    return {
+      ...preview,
+      decision: disposition === "duplicate" ? "seen" : disposition,
+      lead_id: decision?.lead_id || null,
+      score: decision?.score ?? null,
+      assessment: decision?.assessment || null,
+    };
+  });
+}
+
 async function executeDirectScan(requestRow: any) {
   const id = Number(requestRow?.id || 0);
   if (!Number.isInteger(id) || id <= 0) throw new Error("invalid scan request");
   const startedAt = new Date().toISOString();
   await updateRequest(id, { status: "running", started_at: startedAt, error_text: null });
-  const keyword = String(requestRow?.query_override || "").trim() || chooseKeyword(new Date());
+  const metrics = await queryMetrics();
+  const spec = chooseQuery({ override: String(requestRow?.query_override || "").trim() || null, metrics });
   try {
-    const source = await fetchJustOne(keyword);
-    const ingest = await ingestItems(source.items);
-    const decisions = await candidateDecisions(source.items);
-    const leadIds = Array.isArray(ingest?.lead_ids)
-      ? ingest.lead_ids.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0).slice(0, 200)
-      : [];
-    const highIntent = await highIntentCount(leadIds);
-    const posts = source.previews.map((preview: any) => {
-      const decision = decisions.get(String(preview.id)) || { disposition: "unknown", lead_id: null };
-      return { ...preview, decision: decision.disposition, lead_id: decision.lead_id };
-    });
-    const finishedAt = new Date().toISOString();
+    const source = await fetchJustOne(spec);
+    const ingest = await ingestItems(source.items, spec, source);
+    const posts = decoratePosts(source.previews, ingest.decisions || []);
+    const highIntent = (Array.isArray(ingest.decisions) ? ingest.decisions : []).filter((item: any) => item?.disposition === "stored" && Number(item?.score || 0) >= 85).length;
     const result = {
-      connector: "justone-xiaohongshu-v4",
-      keyword,
+      provider: "justone-xiaohongshu-v4",
+      policy_version: ingest.policy_version || POLICY_VERSION,
+      query: {
+        key: spec.key,
+        keyword: spec.keyword,
+        intent_family: spec.intent_family,
+        topic_family: spec.topic_family,
+      },
+      request_id: source.request_id,
       scanned: source.raw_count,
       fresh: source.fresh_count,
-      stored: Number(ingest?.stored || 0),
-      filtered: Number(ingest?.filtered || 0),
-      duplicates: Number(ingest?.duplicates || 0),
-      notified: Number(ingest?.notified || 0),
+      stored: Number(ingest.stored || 0),
+      filtered: Number(ingest.filtered || 0),
+      duplicates: Number(ingest.duplicates || 0),
+      notified: Number(ingest.notified || 0),
       high_intent: highIntent,
-      lead_ids: leadIds,
-      request_id: source.request_id,
+      lead_ids: Array.isArray(ingest.lead_ids) ? ingest.lead_ids : [],
       posts,
-      last_scan_at: finishedAt,
     };
+    const finishedAt = new Date().toISOString();
     await updateRequest(id, { status: "success", finished_at: finishedAt, result, error_text: null });
     await recordRun({
       connector: "justone-xiaohongshu-v4",
       started_at: startedAt,
       finished_at: finishedAt,
-      scanned: source.raw_count,
+      scanned: result.scanned,
       stored: result.stored,
       filtered: result.filtered,
       high_intent: highIntent,
       status: "success",
-      error_text: null,
-      details: {
-        mode: "direct-edge",
-        scan_request_id: id,
-        keyword,
-        fresh: source.fresh_count,
-        preview_count: posts.length,
-        duplicates: result.duplicates,
-        notified: result.notified,
-        provider_request_id: source.request_id,
-      },
+      details: { query: result.query, policy_version: result.policy_version, request_id: source.request_id },
     });
-    return result;
+    return { id, status: "success", requested_at: requestRow.requested_at, started_at: startedAt, finished_at: finishedAt, result, error_text: null };
   } catch (error) {
-    const message = String(error instanceof Error ? error.message : error).slice(0, 600);
     const finishedAt = new Date().toISOString();
-    await updateRequest(id, { status: "failed", finished_at: finishedAt, result: { mode: "direct-edge", keyword }, error_text: message });
+    const message = String(error).slice(0, 700);
+    await updateRequest(id, { status: "failed", finished_at: finishedAt, error_text: message, result: { policy_version: POLICY_VERSION } });
     await recordRun({
       connector: "justone-xiaohongshu-v4",
       started_at: startedAt,
@@ -382,132 +391,84 @@ async function executeDirectScan(requestRow: any) {
       high_intent: 0,
       status: "failed",
       error_text: message,
-      details: { mode: "direct-edge", scan_request_id: id, keyword },
+      details: { policy_version: POLICY_VERSION },
     });
-    throw new Error(message);
+    throw error;
   }
 }
 
 async function statusPayload() {
-  const [runs, requestRows] = await Promise.all([
-    rest("lead_radar_scan_runs?select=id,connector,started_at,finished_at,scanned,stored,filtered,high_intent,status,error_text,details&order=started_at.desc&limit=1"),
-    latestRequests(20),
-  ]);
-  const requests = Array.isArray(requestRows) ? requestRows : [];
-  const latestRun = Array.isArray(runs) ? runs[0] : null;
-  const latestRequest = requests[0] || null;
-  const active = requests.find((row: any) => ["queued", "running"].includes(String(row?.status || ""))) || null;
-  const windowState = requestWindow(requests);
-  const queueAvailable = !active && windowState.recentCount < MAX_REQUESTS_PER_HOUR && windowState.cooldownSeconds === 0;
+  const requests = await latestRequests(10);
+  const rows = Array.isArray(requests) ? requests : [];
+  const active = rows.find((row: any) => ["queued", "running"].includes(String(row?.status || ""))) || null;
+  const latest = rows[0] || null;
+  const latestSuccess = rows.find((row: any) => String(row?.status || "") === "success") || null;
+  const window = requestWindow(rows);
   return {
     ok: true,
-    service: "lead-radar-scan",
-    version: "0.4-post-preview",
-    mode: JUSTONE_TOKEN ? "direct-edge" : "web-queued-github-worker",
-    direct_ready: Boolean(JUSTONE_TOKEN),
     platform: "小红书 · Just One V4",
-    worker_interval_minutes: JUSTONE_TOKEN ? 0 : 5,
+    provider: "justone-xiaohongshu-v4",
+    policy_version: POLICY_VERSION,
+    direct_ready: Boolean(JUSTONE_TOKEN),
     running: String(active?.status || "") === "running",
     queued: String(active?.status || "") === "queued",
     active_request: publicRequest(active),
-    latest_request: publicRequest(latestRequest),
-    last_scan_at: latestRun?.finished_at || null,
-    last_scan: latestRun ? {
-      status: latestRun.status,
-      scanned: Number(latestRun.scanned || 0),
-      stored: Number(latestRun.stored || 0),
-      filtered: Number(latestRun.filtered || 0),
-      high_intent: Number(latestRun.high_intent || 0),
-      connector: latestRun.connector || "justone-xiaohongshu-v4",
-    } : null,
-    queue_available: queueAvailable,
-    cooldown_seconds: windowState.cooldownSeconds,
-    next_available_at: windowState.nextAvailableAt,
-    requests_last_hour: windowState.recentCount,
-    request_limit_per_hour: MAX_REQUESTS_PER_HOUR,
+    latest_request: publicRequest(latest),
+    last_scan_at: latestSuccess?.finished_at || null,
+    recent_count: window.recentCount,
+    cooldown_seconds: window.cooldownSeconds,
+    next_available_at: window.nextAvailableAt,
+    queue_available: !active && window.recentCount < MAX_REQUESTS_PER_HOUR && window.cooldownSeconds <= 0,
   };
 }
 
-Deno.serve(async (req: Request) => {
-  const origin = req.headers.get("origin") || "";
-  const method = req.method.toUpperCase();
-  if (method === "OPTIONS") return new Response(null, { status: 204, headers: cors(origin) });
-  if (origin && !ALLOWED.has(origin)) return json({ detail: "Origin not allowed" }, 403, origin);
+async function createScanRequest() {
+  const rows = await rest("lead_radar_scan_requests?select=*", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({ requested_from: "web", max_queries: 1, provider: "justone-xiaohongshu-v4", status: "queued" }),
+  });
+  return rows?.[0] || null;
+}
 
-  try {
-    const url = new URL(req.url);
-    const path = url.pathname.replace(/^.*\/lead-radar-scan/, "") || "/";
+Deno.serve(async (request) => {
+  const origin = request.headers.get("origin") || "";
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors(origin) });
+  const url = new URL(request.url);
 
-    if (method === "GET" && (path === "/health" || path === "/api/v1/status")) {
-      return json(await statusPayload(), 200, origin);
-    }
-
-    if (method === "POST" && path === "/api/v1/request") {
-      if (!ALLOWED.has(origin)) return json({ detail: "Write origin required" }, 403, origin);
-      const requestRows = await latestRequests(20);
-      const requests = Array.isArray(requestRows) ? requestRows : [];
-      const active = requests.find((row: any) => ["queued", "running"].includes(String(row?.status || ""))) || null;
-      if (active) {
-        if (JUSTONE_TOKEN && String(active.status) === "queued") {
-          try {
-            const result = await executeDirectScan(active);
-            const refreshed = (await latestRequests(1))?.[0] || active;
-            return json({ ok: true, accepted: true, existing: true, direct: true, request: publicRequest(refreshed), result }, 200, origin);
-          } catch (error) {
-            return json({ detail: String(error instanceof Error ? error.message : error).slice(0, 240) }, 502, origin);
-          }
-        }
-        return json({ ok: true, accepted: true, existing: true, direct: false, request: publicRequest(active), eta_minutes: JUSTONE_TOKEN ? 0 : 5 }, 200, origin);
-      }
-
-      const windowState = requestWindow(requests);
-      if (windowState.recentCount >= MAX_REQUESTS_PER_HOUR) {
-        return json({ detail: "扫描额度保护已触发：每小时最多发起 3 次扫描。", retry_after_seconds: 1200 }, 429, origin);
-      }
-      if (windowState.cooldownSeconds > 0) {
-        return json({ detail: "刚刚已经发起过扫描，请稍后再试。", retry_after_seconds: windowState.cooldownSeconds }, 429, origin);
-      }
-
-      let rows;
-      try {
-        const now = new Date().toISOString();
-        rows = await rest("lead_radar_scan_requests?select=*", {
-          method: "POST",
-          headers: { Prefer: "return=representation" },
-          body: JSON.stringify({
-            status: JUSTONE_TOKEN ? "running" : "queued",
-            started_at: JUSTONE_TOKEN ? now : null,
-            requested_from: JUSTONE_TOKEN ? "web-direct" : "web",
-            query_override: null,
-            max_queries: 1,
-            provider: "justone-xiaohongshu-v4",
-            result: {},
-          }),
-        });
-      } catch (error) {
-        const refreshedRows = await latestRequests(5);
-        const refreshed = Array.isArray(refreshedRows) ? refreshedRows : [];
-        const raced = refreshed.find((row: any) => ["queued", "running"].includes(String(row?.status || ""))) || null;
-        if (raced) return json({ ok: true, accepted: true, existing: true, request: publicRequest(raced), eta_minutes: JUSTONE_TOKEN ? 0 : 5 }, 200, origin);
-        throw error;
-      }
-
-      const created = Array.isArray(rows) ? rows[0] : null;
-      if (JUSTONE_TOKEN && created) {
-        try {
-          const result = await executeDirectScan(created);
-          const refreshed = (await latestRequests(1))?.[0] || created;
-          return json({ ok: true, accepted: true, existing: false, direct: true, request: publicRequest(refreshed), result }, 200, origin);
-        } catch (error) {
-          return json({ detail: String(error instanceof Error ? error.message : error).slice(0, 240) }, 502, origin);
-        }
-      }
-      return json({ ok: true, accepted: true, existing: false, direct: false, request: publicRequest(created), eta_minutes: 5 }, 202, origin);
-    }
-
-    return json({ detail: "Not found" }, 404, origin);
-  } catch (error) {
-    console.error(String(error));
-    return json({ detail: "Scan API error" }, 500, origin);
+  if (request.method === "GET" && url.pathname.endsWith("/api/v1/status")) {
+    try { return json(await statusPayload(), 200, origin); }
+    catch (error) { return json({ detail: String(error).slice(0, 400), policy_version: POLICY_VERSION }, 500, origin); }
   }
+
+  if (request.method === "POST" && url.pathname.endsWith("/api/v1/request")) {
+    if (!ALLOWED.has(origin)) return json({ detail: "Origin not allowed" }, 403, origin);
+    try {
+      const requests = await latestRequests(10);
+      const rows = Array.isArray(requests) ? requests : [];
+      const active = rows.find((row: any) => ["queued", "running"].includes(String(row?.status || ""))) || null;
+      if (active) {
+        if (String(active.status) === "queued" && JUSTONE_TOKEN) {
+          const completed = await executeDirectScan(active);
+          return json({ ok: true, direct: true, existing: true, request: publicRequest(completed) }, 200, origin);
+        }
+        return json({ ok: true, direct: false, existing: true, request: publicRequest(active) }, 200, origin);
+      }
+
+      const window = requestWindow(rows);
+      if (window.recentCount >= MAX_REQUESTS_PER_HOUR || window.cooldownSeconds > 0) {
+        return json({ detail: "Scan rate limit active", retry_after_seconds: Math.max(1, window.cooldownSeconds), next_available_at: window.nextAvailableAt }, 429, origin);
+      }
+
+      const created = await createScanRequest();
+      if (!created?.id) throw new Error("failed to create scan request");
+      if (!JUSTONE_TOKEN) return json({ ok: true, direct: false, existing: false, request: publicRequest(created) }, 202, origin);
+      const completed = await executeDirectScan(created);
+      return json({ ok: true, direct: true, existing: false, request: publicRequest(completed) }, 200, origin);
+    } catch (error) {
+      return json({ detail: String(error).slice(0, 500), policy_version: POLICY_VERSION }, 500, origin);
+    }
+  }
+
+  return json({ detail: "Not found" }, 404, origin);
 });

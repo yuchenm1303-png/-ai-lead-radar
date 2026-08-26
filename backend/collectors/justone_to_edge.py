@@ -78,7 +78,7 @@ def post_oidc_json(
             "Authorization": f"Bearer {oidc_token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "AI-Lead-Radar-Collector/1.1",
+            "User-Agent": "AI-Lead-Radar-Collector/2.0",
         },
         data=json.dumps(body or {}, ensure_ascii=False).encode("utf-8"),
     )
@@ -124,6 +124,8 @@ def run(
                 "key": spec.key,
                 "keyword": spec.keyword,
                 "category": spec.category,
+                "intent_family": spec.intent_family,
+                "topic_family": spec.topic_family,
                 "raw_count": result.raw_count,
                 "normalized_count": len(result.leads),
                 "fresh_count": len(fresh),
