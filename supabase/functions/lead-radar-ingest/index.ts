@@ -273,8 +273,11 @@ async function ingest(payload: any) {
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") return new Response(null, { status: 204 });
-  if (!authorized(request)) return json({ detail: "Unauthorized" }, 401);
   const url = new URL(request.url);
+  if (request.method === "GET" && url.pathname.endsWith("/health")) {
+    return json({ ok: true, service: "lead-radar-ingest", policy_version: POLICY_VERSION, auth: "server-to-server" });
+  }
+  if (!authorized(request)) return json({ detail: "Unauthorized" }, 401);
   if (request.method !== "POST" || !url.pathname.endsWith("/api/v1/ingest")) return json({ detail: "Not found" }, 404);
   try {
     return json(await ingest(await request.json()));
