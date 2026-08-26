@@ -56,12 +56,65 @@ function clamp(value: unknown, min = 0, max = 100, fallback = 0) {
   return Math.max(min, Math.min(max, Math.round(number)));
 }
 
+function serviceKey() {
+  const legacy = (Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "").trim();
+  try {
+    const keys = JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS") || "{}");
+    return String(keys.default || legacy || "").trim();
+  } catch {
+    return legacy;
+  }
+}
+
+function effectiveProvider(settings: IntelligenceSettings): SemanticProvider {
+  if (settings.provider === "minimax" || /^minimax-/i.test(settings.model || "")) return "minimax";
+  return "openai";
+}
+
 export function defaultSemanticModel(provider: SemanticProvider) {
   return DEFAULT_SEMANTIC_MODELS[provider];
 }
 
-export function providerReady(apiKey: string | null | undefined) {
-  return Boolean(String(apiKey || "").trim());
+export function providerReady(apiKey?: string | null) {
+  if (String(apiKey || "").trim()) return true;
+  if ((Deno.env.get("OPENAI_API_KEY") || "").trim()) return true;
+  if ((Deno.env.get("MINIMAX_API_KEY") || "").trim()) return true;
+  return Boolean((Deno.env.get("SUPABASE_URL") || "").trim() && serviceKey());
+}
+
+async function resolveSemanticCredential(
+  settings: IntelligenceSettings,
+  fetchImpl: typeof fetch,
+) {
+  const provider = effectiveProvider(settings);
+  const envKey = provider === "minimax"
+    ? (Deno.env.get("MINIMAX_API_KEY") || "").trim()
+    : (Deno.env.get("OPENAI_API_KEY") || "").trim();
+  if (envKey) return envKey;
+
+  const sbUrl = (Deno.env.get("SUPABASE_URL") || "").trim();
+  const secretKey = serviceKey();
+  if (!sbUrl || !secretKey) return "";
+  try {
+    const headers: Record<string, string> = {
+      apikey: secretKey,
+      "Content-Type": "application/json",
+    };
+    if (secretKey.startsWith("ey")) headers.Authorization = `Bearer ${secretKey}`;
+    const response = await fetchImpl(`${sbUrl}/rest/v1/rpc/lead_radar_get_intelligence_secret`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ p_provider: provider }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) return "";
+    const text = await response.text();
+    if (!text) return "";
+    const parsed = JSON.parse(text);
+    return typeof parsed === "string" ? parsed.trim() : "";
+  } catch {
+    return "";
+  }
 }
 
 export function hardGuardrail(assessment: PolicyAssessment): GuardrailResult {
@@ -301,13 +354,15 @@ async function classifyMiniMax(
 export async function classifySemanticBatch(
   candidates: SemanticCandidate[],
   settings: IntelligenceSettings,
-  apiKey: string | null | undefined,
+  apiKey?: string | null,
   fetchImpl: typeof fetch = fetch,
 ): Promise<Map<string, SemanticAssessment>> {
-  if (!settings.enabled || settings.mode === "off" || !candidates.length || !providerReady(apiKey)) {
+  if (!settings.enabled || settings.mode === "off" || !candidates.length) {
     return new Map<string, SemanticAssessment>();
   }
-  const credential = String(apiKey || "").trim();
-  if (settings.provider === "minimax") return await classifyMiniMax(candidates, settings, credential, fetchImpl);
-  return await classifyOpenAI(candidates, settings, credential, fetchImpl);
+  const provider = effectiveProvider(settings);
+  const credential = String(apiKey || await resolveSemanticCredential({ ...settings, provider }, fetchImpl) || "").trim();
+  if (!credential) return new Map<string, SemanticAssessment>();
+  if (provider === "minimax") return await classifyMiniMax(candidates, { ...settings, provider }, credential, fetchImpl);
+  return await classifyOpenAI(candidates, { ...settings, provider }, credential, fetchImpl);
 }
