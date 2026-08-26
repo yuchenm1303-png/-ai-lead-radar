@@ -1,4 +1,12 @@
-import { chooseQuery, POLICY_VERSION, type QueryMetric, type QuerySpec } from "../_shared/lead_policy.ts";
+import { POLICY_VERSION } from "../_shared/lead_policy.ts";
+import {
+  chooseQueries,
+  retrievalLimits,
+  shouldFetchNextPage,
+  RETRIEVAL_VERSION,
+  type QueryMetric,
+  type QuerySpec,
+} from "../_shared/retrieval_policy.ts";
 
 const ALLOWED = new Set(["https://smirel.com", "http://localhost:3000"]);
 const SB_URL = Deno.env.get("SUPABASE_URL") || "";
@@ -12,9 +20,9 @@ const JUSTONE_TOKEN = (Deno.env.get("JUSTONE_API_TOKEN") || "").trim();
 const JUSTONE_ENDPOINT = (Deno.env.get("JUSTONE_API_ENDPOINT") || "https://api.justoneapi.com/api/xiaohongshu/search-note/v4").trim();
 const MAX_REQUESTS_PER_HOUR = 3;
 const MIN_REQUEST_GAP_MS = 5 * 60 * 1000;
-const MAX_AGE_MINUTES = 24 * 60;
 const MAX_PREVIEW_BODY_CHARS = 12000;
 const MAX_PREVIEW_IMAGES = 9;
+const LIMITS = retrievalLimits();
 
 function cors(origin = "") {
   return {
@@ -60,7 +68,7 @@ function publicRequest(row: any) {
 }
 
 async function latestRequests(limit = 10) {
-  return await rest(`lead_radar_scan_requests?select=id,status,requested_at,started_at,finished_at,query_override,max_queries,provider,result,error_text&order=requested_at.desc&limit=${limit}`);
+  return await rest(`lead_radar_scan_requests?select=id,status,requested_at,started_at,finished_at,query_override,max_queries,requested_from,provider,result,error_text&order=requested_at.desc&limit=${limit}`);
 }
 
 function requestWindow(requests: any[]) {
@@ -79,22 +87,77 @@ function requestWindow(requests: any[]) {
   };
 }
 
+function metricFromRow(row: any): QueryMetric {
+  return {
+    runs: Number(row?.runs || 0),
+    api_calls: Number(row?.api_calls || row?.runs || 0),
+    returned_count: Number(row?.returned_count || 0),
+    fresh_count: Number(row?.fresh_count || 0),
+    qualified_count: Number(row?.qualified_count || 0),
+    filtered_count: Number(row?.filtered_count || 0),
+    duplicate_count: Number(row?.duplicate_count || 0),
+    human_positive_count: Number(row?.human_positive_count || 0),
+    human_negative_count: Number(row?.human_negative_count || 0),
+    last_run_at: row?.last_run_at || null,
+  };
+}
+
 async function queryMetrics(): Promise<Record<string, QueryMetric>> {
+  const result: Record<string, QueryMetric> = {};
   try {
-    const rows = await rest("lead_radar_query_metrics?select=query_key,runs,fresh_count,qualified_count&limit=500");
-    const result: Record<string, QueryMetric> = {};
+    const rows = await rest("lead_radar_query_scheduler_stats?select=query_key,runs,api_calls,returned_count,fresh_count,qualified_count,filtered_count,duplicate_count,human_positive_count,human_negative_count,last_run_at&limit=1000");
     for (const row of Array.isArray(rows) ? rows : []) {
       const key = String(row?.query_key || "");
-      if (!key) continue;
-      result[key] = {
-        runs: Number(row?.runs || 0),
-        fresh_count: Number(row?.fresh_count || 0),
-        qualified_count: Number(row?.qualified_count || 0),
-      };
+      if (key) result[key] = metricFromRow(row);
     }
-    return result;
+  } catch (error) {
+    console.warn("retrieval scheduler stats unavailable", String(error));
+  }
+  try {
+    const rows = await rest("lead_radar_query_metrics?select=query_key,runs,returned_count,fresh_count,qualified_count,filtered_count,duplicate_count,last_run_at&limit=1000");
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const key = String(row?.query_key || "");
+      if (key && !result[key]) result[key] = metricFromRow(row);
+    }
+  } catch {}
+  return result;
+}
+
+async function retrievalSettings() {
+  const defaults = {
+    auto_enabled: false,
+    auto_interval_minutes: 60,
+    auto_queries_per_scan: LIMITS.max_queries_auto,
+    auto_provider_calls_per_scan: LIMITS.max_provider_calls_auto,
+    manual_queries_per_scan: LIMITS.max_queries_web,
+    manual_provider_calls_per_scan: LIMITS.max_provider_calls_web,
+    provider_calls_per_hour_cap: 6,
+  };
+  try {
+    const rows = await rest("lead_radar_retrieval_settings?id=eq.1&select=auto_enabled,auto_interval_minutes,auto_queries_per_scan,auto_provider_calls_per_scan,manual_queries_per_scan,manual_provider_calls_per_scan,provider_calls_per_hour_cap&limit=1");
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return defaults;
+    return {
+      auto_enabled: Boolean(row.auto_enabled),
+      auto_interval_minutes: Math.max(15, Number(row.auto_interval_minutes || defaults.auto_interval_minutes)),
+      auto_queries_per_scan: Math.max(1, Math.min(3, Number(row.auto_queries_per_scan || defaults.auto_queries_per_scan))),
+      auto_provider_calls_per_scan: Math.max(1, Math.min(6, Number(row.auto_provider_calls_per_scan || defaults.auto_provider_calls_per_scan))),
+      manual_queries_per_scan: Math.max(1, Math.min(3, Number(row.manual_queries_per_scan || defaults.manual_queries_per_scan))),
+      manual_provider_calls_per_scan: Math.max(1, Math.min(6, Number(row.manual_provider_calls_per_scan || defaults.manual_provider_calls_per_scan))),
+      provider_calls_per_hour_cap: Math.max(1, Math.min(30, Number(row.provider_calls_per_hour_cap || defaults.provider_calls_per_hour_cap))),
+    };
   } catch {
-    return {};
+    return defaults;
+  }
+}
+
+async function providerCallsLastHour() {
+  try {
+    const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const rows = await rest(`lead_radar_query_runs?select=api_calls&started_at=gte.${encodeURIComponent(since)}&limit=1000`);
+    return (Array.isArray(rows) ? rows : []).reduce((sum: number, row: any) => sum + Math.max(0, Number(row?.api_calls || 0)), 0);
+  } catch {
+    return 0;
   }
 }
 
@@ -205,17 +268,43 @@ function buildPreview(note: any, id: string, title: string, body: string, publis
   };
 }
 
-async function fetchJustOne(spec: QuerySpec) {
+function parseNote(note: any, now = Date.now()) {
+  if (!note || typeof note !== "object" || Array.isArray(note)) return null;
+  const id = String(note.id || "").trim();
+  const title = String(note.title || "").trim();
+  const body = String(note.desc || "").trim();
+  const published = parseTimestamp(note.timestamp);
+  if (!id || !published || (!title && !body)) return null;
+  const preview = buildPreview(note, id, title, body, published);
+  const ageMinutes = (now - published.getTime()) / 60000;
+  return {
+    id,
+    published,
+    fresh: ageMinutes >= -5 && ageMinutes <= LIMITS.freshness_minutes,
+    item: {
+      source: "小红书",
+      external_id: id.slice(0, 160),
+      title: preview.title,
+      excerpt: body.slice(0, 1600),
+      published_at: published.toISOString(),
+      url: preview.url,
+      budget: null,
+    },
+    preview,
+  };
+}
+
+async function fetchJustOnePage(spec: QuerySpec, page: number) {
   if (!JUSTONE_TOKEN) throw new Error("JUSTONE_API_TOKEN is not configured");
   const url = new URL(JUSTONE_ENDPOINT);
   url.searchParams.set("token", JUSTONE_TOKEN);
   url.searchParams.set("keyword", spec.keyword);
-  url.searchParams.set("page", "1");
+  url.searchParams.set("page", String(Math.max(1, page)));
   url.searchParams.set("sortType", "time_descending");
   url.searchParams.set("noteType", "ALL");
   url.searchParams.set("timeFilter", "ALL");
   const response = await fetch(url, {
-    headers: { Accept: "application/json", "User-Agent": "AI-Lead-Radar/2.0" },
+    headers: { Accept: "application/json", "User-Agent": "AI-Lead-Radar/3.0" },
     signal: AbortSignal.timeout(20000),
   });
   const text = await response.text();
@@ -225,45 +314,91 @@ async function fetchJustOne(spec: QuerySpec) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Just One returned a non-object response");
   if (payload.code !== 0) throw new Error(`Just One business code ${String(payload.code)}: ${String(payload.message || payload.msg || "business error").slice(0, 180)}`);
 
-  const notes = Array.isArray(payload?.data?.notes) ? payload.data.notes : [];
+  const data = payload?.data && typeof payload.data === "object" ? payload.data : {};
+  const notes = Array.isArray(data?.notes) ? data.notes : [];
   const now = Date.now();
-  const unique = new Map<string, { item: any; preview: any }>();
-  for (const note of notes) {
-    if (!note || typeof note !== "object" || Array.isArray(note)) continue;
-    const id = String(note.id || "").trim();
-    const title = String(note.title || "").trim();
-    const body = String(note.desc || "").trim();
-    const published = parseTimestamp(note.timestamp);
-    if (!id || !published || (!title && !body)) continue;
-    const ageMinutes = (now - published.getTime()) / 60000;
-    if (ageMinutes < -5 || ageMinutes > MAX_AGE_MINUTES || unique.has(id)) continue;
-    const preview = buildPreview(note, id, title, body, published);
-    unique.set(id, {
-      item: {
-        source: "小红书",
-        external_id: id.slice(0, 160),
-        title: preview.title,
-        excerpt: body.slice(0, 1600),
-        published_at: published.toISOString(),
-        url: preview.url,
-        budget: null,
-      },
-      preview,
-    });
-  }
+  const parsed = notes.map((note: any) => parseNote(note, now)).filter(Boolean) as any[];
+  const dates = parsed.map((entry) => entry.published.getTime()).filter(Number.isFinite);
+  const hasMoreRaw = data?.has_more ?? data?.hasMore;
   return {
+    page,
     raw_count: notes.length,
-    fresh_count: unique.size,
+    normalized_count: parsed.length,
     request_id: payload.requestId ? String(payload.requestId).slice(0, 160) : null,
-    items: [...unique.values()].map((entry) => entry.item),
-    previews: [...unique.values()].map((entry) => entry.preview),
+    has_more: typeof hasMoreRaw === "boolean" ? hasMoreRaw : null,
+    newest_published_at: dates.length ? new Date(Math.max(...dates)).toISOString() : null,
+    oldest_published_at: dates.length ? new Date(Math.min(...dates)).toISOString() : null,
+    entries: parsed.filter((entry) => entry.fresh),
   };
 }
 
-async function ingestItems(items: any[], spec: QuerySpec, source: any) {
-  if (!items.length) {
-    return { ok: true, received: 0, stored: 0, filtered: 0, duplicates: 0, notified: 0, lead_ids: [], decisions: [], policy_version: POLICY_VERSION };
+function newQuerySource(spec: QuerySpec) {
+  return {
+    spec,
+    started_at: new Date().toISOString(),
+    raw_count: 0,
+    normalized_count: 0,
+    pages: 0,
+    api_calls: 0,
+    request_ids: [] as string[],
+    has_more: null as boolean | null,
+    newest_published_at: null as string | null,
+    oldest_published_at: null as string | null,
+    last_page_raw_count: 0,
+    last_page_oldest_published_at: null as string | null,
+    entries: new Map<string, { item: any; preview: any }>(),
+  };
+}
+
+function mergePage(source: ReturnType<typeof newQuerySource>, page: Awaited<ReturnType<typeof fetchJustOnePage>>) {
+  source.raw_count += page.raw_count;
+  source.normalized_count += page.normalized_count;
+  source.pages += 1;
+  source.api_calls += 1;
+  source.has_more = page.has_more;
+  source.last_page_raw_count = page.raw_count;
+  source.last_page_oldest_published_at = page.oldest_published_at;
+  if (page.request_id) source.request_ids.push(page.request_id);
+  if (page.newest_published_at && (!source.newest_published_at || page.newest_published_at > source.newest_published_at)) source.newest_published_at = page.newest_published_at;
+  if (page.oldest_published_at && (!source.oldest_published_at || page.oldest_published_at < source.oldest_published_at)) source.oldest_published_at = page.oldest_published_at;
+  for (const entry of page.entries) {
+    if (!source.entries.has(entry.id)) source.entries.set(entry.id, { item: entry.item, preview: entry.preview });
   }
+}
+
+async function executeRetrievalPlan(specs: QuerySpec[], providerCallBudget: number) {
+  const sources = specs.map(newQuerySource);
+  let providerCallsUsed = 0;
+
+  for (const source of sources) {
+    if (providerCallsUsed >= providerCallBudget) break;
+    const page = await fetchJustOnePage(source.spec, 1);
+    providerCallsUsed += 1;
+    mergePage(source, page);
+  }
+
+  while (providerCallsUsed < providerCallBudget) {
+    const candidates = sources
+      .filter((source) => source.pages > 0 && shouldFetchNextPage({
+        rawCount: source.last_page_raw_count,
+        oldestPublishedAt: source.last_page_oldest_published_at,
+        hasMore: source.has_more,
+        pagesFetched: source.pages,
+        providerCallsUsed,
+        providerCallBudget,
+      }))
+      .sort((a, b) => b.entries.size - a.entries.size || b.raw_count - a.raw_count);
+    const source = candidates[0];
+    if (!source) break;
+    const page = await fetchJustOnePage(source.spec, source.pages + 1);
+    providerCallsUsed += 1;
+    mergePage(source, page);
+  }
+
+  return { sources: sources.filter((source) => source.pages > 0), providerCallsUsed };
+}
+
+async function ingestItems(items: any[], spec: QuerySpec, source: ReturnType<typeof newQuerySource>, scanRequestId: number) {
   const response = await fetch(`${SB_URL}/functions/v1/lead-radar-ingest/api/v1/ingest`, {
     method: "POST",
     headers: {
@@ -275,12 +410,22 @@ async function ingestItems(items: any[], spec: QuerySpec, source: any) {
     body: JSON.stringify({
       items,
       query_context: {
+        scan_request_id: scanRequestId,
+        provider: "justone-xiaohongshu-v4",
+        retrieval_version: RETRIEVAL_VERSION,
         query_key: spec.key,
         query_text: spec.keyword,
+        lane: spec.lane,
         intent_family: spec.intent_family,
         topic_family: spec.topic_family,
+        started_at: source.started_at,
+        pages: source.pages,
+        api_calls: source.api_calls,
         returned_count: source.raw_count,
-        fresh_count: source.fresh_count,
+        normalized_count: source.normalized_count,
+        fresh_count: source.entries.size,
+        newest_published_at: source.newest_published_at,
+        oldest_published_at: source.oldest_published_at,
       },
     }),
     signal: AbortSignal.timeout(30000),
@@ -331,36 +476,114 @@ function decoratePosts(previews: any[], decisions: any[]) {
   });
 }
 
+function postRank(post: any) {
+  const decision = String(post?.decision || "unknown");
+  if (decision === "stored") return 4;
+  if (decision === "filtered") return 3;
+  if (decision === "seen") return 2;
+  return 1;
+}
+
 async function executeDirectScan(requestRow: any) {
   const id = Number(requestRow?.id || 0);
   if (!Number.isInteger(id) || id <= 0) throw new Error("invalid scan request");
   const startedAt = new Date().toISOString();
   await updateRequest(id, { status: "running", started_at: startedAt, error_text: null });
-  const metrics = await queryMetrics();
-  const spec = chooseQuery({ override: String(requestRow?.query_override || "").trim() || null, metrics });
+
   try {
-    const source = await fetchJustOne(spec);
-    const ingest = await ingestItems(source.items, spec, source);
-    const posts = decoratePosts(source.previews, ingest.decisions || []);
-    const highIntent = (Array.isArray(ingest.decisions) ? ingest.decisions : []).filter((item: any) => item?.disposition === "stored" && Number(item?.score || 0) >= 85).length;
+    const settings = await retrievalSettings();
+    const callsLastHour = await providerCallsLastHour();
+    const remainingHourlyCalls = Math.max(0, settings.provider_calls_per_hour_cap - callsLastHour);
+    if (remainingHourlyCalls <= 0) throw new Error("Provider hourly call budget exhausted");
+    const requestedFrom = String(requestRow?.requested_from || "web");
+    const perScanBudget = requestedFrom === "auto" ? settings.auto_provider_calls_per_scan : settings.manual_provider_calls_per_scan;
+    const providerCallBudget = Math.max(1, Math.min(perScanBudget, remainingHourlyCalls));
+    const desiredQueries = Math.max(1, Math.min(3, Number(requestRow?.max_queries || (requestedFrom === "auto" ? settings.auto_queries_per_scan : settings.manual_queries_per_scan))));
+    const metrics = await queryMetrics();
+    const specs = chooseQueries({
+      override: String(requestRow?.query_override || "").trim() || null,
+      metrics,
+      count: Math.min(desiredQueries, providerCallBudget),
+    });
+    if (!specs.length) throw new Error("retrieval plan is empty");
+
+    const retrieval = await executeRetrievalPlan(specs, providerCallBudget);
+    const postMap = new Map<string, any>();
+    const leadIds = new Set<number>();
+    const queryResults: any[] = [];
+    let totalStored = 0;
+    let totalFiltered = 0;
+    let totalDuplicates = 0;
+    let totalNotified = 0;
+    let totalScanned = 0;
+
+    for (const source of retrieval.sources) {
+      const items = [...source.entries.values()].map((entry) => entry.item);
+      const previews = [...source.entries.values()].map((entry) => entry.preview);
+      const ingest = await ingestItems(items, source.spec, source, id);
+      const posts = decoratePosts(previews, ingest.decisions || []);
+      for (const post of posts) {
+        const key = String(post.id || "");
+        if (!key) continue;
+        const previous = postMap.get(key);
+        if (!previous || postRank(post) > postRank(previous)) postMap.set(key, post);
+      }
+      for (const leadId of Array.isArray(ingest.lead_ids) ? ingest.lead_ids : []) {
+        if (Number.isInteger(Number(leadId)) && Number(leadId) > 0) leadIds.add(Number(leadId));
+      }
+      totalStored += Number(ingest.stored || 0);
+      totalFiltered += Number(ingest.filtered || 0);
+      totalDuplicates += Number(ingest.duplicates || 0);
+      totalNotified += Number(ingest.notified || 0);
+      totalScanned += source.raw_count;
+      queryResults.push({
+        key: source.spec.key,
+        keyword: source.spec.keyword,
+        lane: source.spec.lane,
+        intent_family: source.spec.intent_family,
+        topic_family: source.spec.topic_family,
+        pages: source.pages,
+        api_calls: source.api_calls,
+        raw_count: source.raw_count,
+        normalized_count: source.normalized_count,
+        fresh_count: source.entries.size,
+        stored: Number(ingest.stored || 0),
+        filtered: Number(ingest.filtered || 0),
+        duplicates: Number(ingest.duplicates || 0),
+        request_ids: source.request_ids,
+        newest_published_at: source.newest_published_at,
+        oldest_published_at: source.oldest_published_at,
+      });
+    }
+
+    const posts = [...postMap.values()].sort((a, b) => new Date(b.published_at || 0).getTime() - new Date(a.published_at || 0).getTime());
+    const storedVisible = posts.filter((post) => post.decision === "stored").length;
+    const filteredVisible = posts.filter((post) => post.decision === "filtered").length;
+    const highIntent = posts.filter((post) => post.decision === "stored" && Number(post.score || 0) >= 85).length;
     const result = {
       provider: "justone-xiaohongshu-v4",
-      policy_version: ingest.policy_version || POLICY_VERSION,
-      query: {
-        key: spec.key,
-        keyword: spec.keyword,
-        intent_family: spec.intent_family,
-        topic_family: spec.topic_family,
-      },
-      request_id: source.request_id,
-      scanned: source.raw_count,
-      fresh: source.fresh_count,
-      stored: Number(ingest.stored || 0),
-      filtered: Number(ingest.filtered || 0),
-      duplicates: Number(ingest.duplicates || 0),
-      notified: Number(ingest.notified || 0),
+      policy_version: POLICY_VERSION,
+      retrieval_version: RETRIEVAL_VERSION,
+      query: queryResults[0] ? {
+        key: queryResults[0].key,
+        keyword: queryResults[0].keyword,
+        lane: queryResults[0].lane,
+        intent_family: queryResults[0].intent_family,
+        topic_family: queryResults[0].topic_family,
+      } : null,
+      queries: queryResults,
+      provider_calls: retrieval.providerCallsUsed,
+      provider_call_budget: providerCallBudget,
+      scanned: totalScanned,
+      fresh: posts.length,
+      stored: storedVisible,
+      filtered: filteredVisible,
+      duplicates: totalDuplicates,
+      classified_stored: totalStored,
+      classified_filtered: totalFiltered,
+      notified: totalNotified,
       high_intent: highIntent,
-      lead_ids: Array.isArray(ingest.lead_ids) ? ingest.lead_ids : [],
+      lead_ids: [...leadIds],
       posts,
     };
     const finishedAt = new Date().toISOString();
@@ -374,13 +597,20 @@ async function executeDirectScan(requestRow: any) {
       filtered: result.filtered,
       high_intent: highIntent,
       status: "success",
-      details: { query: result.query, policy_version: result.policy_version, request_id: source.request_id },
+      error_text: null,
+      details: {
+        mode: "retrieval-v2",
+        retrieval_version: RETRIEVAL_VERSION,
+        policy_version: POLICY_VERSION,
+        provider_calls: result.provider_calls,
+        queries: queryResults,
+      },
     });
     return { id, status: "success", requested_at: requestRow.requested_at, started_at: startedAt, finished_at: finishedAt, result, error_text: null };
   } catch (error) {
     const finishedAt = new Date().toISOString();
     const message = String(error).slice(0, 700);
-    await updateRequest(id, { status: "failed", finished_at: finishedAt, error_text: message, result: { policy_version: POLICY_VERSION } });
+    await updateRequest(id, { status: "failed", finished_at: finishedAt, error_text: message, result: { policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION } });
     await recordRun({
       connector: "justone-xiaohongshu-v4",
       started_at: startedAt,
@@ -391,7 +621,7 @@ async function executeDirectScan(requestRow: any) {
       high_intent: 0,
       status: "failed",
       error_text: message,
-      details: { policy_version: POLICY_VERSION },
+      details: { policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION },
     });
     throw error;
   }
@@ -404,11 +634,14 @@ async function statusPayload() {
   const latest = rows[0] || null;
   const latestSuccess = rows.find((row: any) => String(row?.status || "") === "success") || null;
   const window = requestWindow(rows);
+  const settings = await retrievalSettings();
+  const callsLastHour = await providerCallsLastHour();
   return {
     ok: true,
     platform: "小红书 · Just One V4",
     provider: "justone-xiaohongshu-v4",
     policy_version: POLICY_VERSION,
+    retrieval_version: RETRIEVAL_VERSION,
     direct_ready: Boolean(JUSTONE_TOKEN),
     running: String(active?.status || "") === "running",
     queued: String(active?.status || "") === "queued",
@@ -418,15 +651,28 @@ async function statusPayload() {
     recent_count: window.recentCount,
     cooldown_seconds: window.cooldownSeconds,
     next_available_at: window.nextAvailableAt,
-    queue_available: !active && window.recentCount < MAX_REQUESTS_PER_HOUR && window.cooldownSeconds <= 0,
+    queue_available: !active && window.recentCount < MAX_REQUESTS_PER_HOUR && window.cooldownSeconds <= 0 && callsLastHour < settings.provider_calls_per_hour_cap,
+    retrieval: {
+      manual_queries_per_scan: settings.manual_queries_per_scan,
+      manual_provider_calls_per_scan: settings.manual_provider_calls_per_scan,
+      provider_calls_last_hour: callsLastHour,
+      provider_calls_per_hour_cap: settings.provider_calls_per_hour_cap,
+      auto_enabled: settings.auto_enabled,
+      auto_interval_minutes: settings.auto_interval_minutes,
+    },
   };
 }
 
-async function createScanRequest() {
+async function createScanRequest(settings: Awaited<ReturnType<typeof retrievalSettings>>) {
   const rows = await rest("lead_radar_scan_requests?select=*", {
     method: "POST",
     headers: { Prefer: "return=representation" },
-    body: JSON.stringify({ requested_from: "web", max_queries: 1, provider: "justone-xiaohongshu-v4", status: "queued" }),
+    body: JSON.stringify({
+      requested_from: "web",
+      max_queries: settings.manual_queries_per_scan,
+      provider: "justone-xiaohongshu-v4",
+      status: "queued",
+    }),
   });
   return rows?.[0] || null;
 }
@@ -438,7 +684,7 @@ Deno.serve(async (request) => {
 
   if (request.method === "GET" && url.pathname.endsWith("/api/v1/status")) {
     try { return json(await statusPayload(), 200, origin); }
-    catch (error) { return json({ detail: String(error).slice(0, 400), policy_version: POLICY_VERSION }, 500, origin); }
+    catch (error) { return json({ detail: String(error).slice(0, 400), policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION }, 500, origin); }
   }
 
   if (request.method === "POST" && url.pathname.endsWith("/api/v1/request")) {
@@ -460,13 +706,18 @@ Deno.serve(async (request) => {
         return json({ detail: "Scan rate limit active", retry_after_seconds: Math.max(1, window.cooldownSeconds), next_available_at: window.nextAvailableAt }, 429, origin);
       }
 
-      const created = await createScanRequest();
+      const settings = await retrievalSettings();
+      const callsLastHour = await providerCallsLastHour();
+      if (callsLastHour >= settings.provider_calls_per_hour_cap) {
+        return json({ detail: "Provider hourly call budget active", provider_calls_last_hour: callsLastHour, provider_calls_per_hour_cap: settings.provider_calls_per_hour_cap }, 429, origin);
+      }
+      const created = await createScanRequest(settings);
       if (!created?.id) throw new Error("failed to create scan request");
       if (!JUSTONE_TOKEN) return json({ ok: true, direct: false, existing: false, request: publicRequest(created) }, 202, origin);
       const completed = await executeDirectScan(created);
       return json({ ok: true, direct: true, existing: false, request: publicRequest(completed) }, 200, origin);
     } catch (error) {
-      return json({ detail: String(error).slice(0, 500), policy_version: POLICY_VERSION }, 500, origin);
+      return json({ detail: String(error).slice(0, 500), policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION }, 500, origin);
     }
   }
 
