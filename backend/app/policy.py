@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -186,9 +185,3 @@ def evaluate_gold_set(samples: list[dict[str, Any]]) -> dict[str, float | int]:
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     actor_accuracy = actor_correct / len(samples) if samples else 1.0
     return {"samples": len(samples), "tp": tp, "fp": fp, "tn": tn, "fn": fn, "precision": precision, "recall": recall, "f1": f1, "actor_accuracy": actor_accuracy}
-
-
-def query_ucb_score(*, prior: float, runs: int, fresh_count: int, qualified_count: int, total_runs: int, exploration: float) -> float:
-    precision = (qualified_count + 0.5) / (fresh_count + 2.0)
-    explore = math.sqrt(math.log(total_runs + 2.0) / (runs + 1.0))
-    return float(prior) * (precision + exploration * explore)
