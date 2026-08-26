@@ -7,6 +7,16 @@ try {
   SECRET_KEY = keys.default || SECRET_KEY;
 } catch {}
 
+const FEEDBACK_LABELS = new Set(["lead", "maybe", "not_lead"]);
+const FEEDBACK_REASONS = new Set([
+  "provider_self_promo",
+  "tutorial_content",
+  "recruiting",
+  "learning",
+  "general_discussion",
+  "other",
+]);
+
 function cors(origin = "") {
   return {
     "Access-Control-Allow-Origin": ALLOWED.has(origin) ? origin : "https://smirel.com",
@@ -76,6 +86,17 @@ function out(row: any) {
   };
 }
 
+function feedbackOut(row: any) {
+  return {
+    source: String(row?.source || ""),
+    source_id: String(row?.source_id || ""),
+    label: String(row?.label || ""),
+    reason_code: row?.reason_code ? String(row.reason_code) : null,
+    note: row?.note ? String(row.note) : null,
+    updated_at: row?.updated_at || row?.created_at || null,
+  };
+}
+
 async function delegateIngest(items: unknown[]) {
   if (!SB_URL || !SECRET_KEY) throw new Error("Supabase server credentials are unavailable");
   const response = await fetch(`${SB_URL}/functions/v1/lead-radar-ingest/api/v1/ingest`, {
@@ -97,6 +118,56 @@ async function delegateIngest(items: unknown[]) {
   return payload;
 }
 
+async function listFeedback(url: URL) {
+  const limit = Math.max(1, Math.min(500, Number(url.searchParams.get("limit") || 200)));
+  const source = String(url.searchParams.get("source") || "").trim().slice(0, 40);
+  let path = `lead_radar_feedback?select=source,source_id,label,reason_code,note,created_at,updated_at&order=updated_at.desc&limit=${limit}`;
+  if (source) path += `&source=eq.${encodeURIComponent(source)}`;
+  const rows = await rest(path);
+  return (Array.isArray(rows) ? rows : []).map(feedbackOut);
+}
+
+async function saveFeedback(body: any) {
+  const source = String(body?.source || "").trim().slice(0, 40);
+  const sourceId = String(body?.source_id || body?.external_id || "").trim().slice(0, 160);
+  const label = String(body?.label || "").trim();
+  let reasonCode = body?.reason_code ? String(body.reason_code).trim().slice(0, 80) : null;
+  const note = body?.note ? String(body.note).trim().slice(0, 600) : null;
+
+  if (!source || !sourceId) throw new TypeError("source and source_id required");
+  if (!FEEDBACK_LABELS.has(label)) throw new TypeError("invalid feedback label");
+  if (label === "not_lead") {
+    if (!reasonCode || !FEEDBACK_REASONS.has(reasonCode)) throw new TypeError("reason_code required for not_lead");
+  } else {
+    reasonCode = null;
+  }
+
+  const rows = await rest("lead_radar_feedback?on_conflict=source,source_id&select=source,source_id,label,reason_code,note,created_at,updated_at", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify({
+      source,
+      source_id: sourceId,
+      label,
+      reason_code: reasonCode,
+      note,
+      updated_at: new Date().toISOString(),
+    }),
+  });
+  const saved = Array.isArray(rows) ? rows[0] : null;
+  if (!saved) throw new Error("feedback upsert returned no row");
+
+  if (label === "lead" || label === "not_lead") {
+    await rest(`lead_radar_leads?source=eq.${encodeURIComponent(source)}&source_id=eq.${encodeURIComponent(sourceId)}`, {
+      method: "PATCH",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({ is_lead: label === "lead", updated_at: new Date().toISOString() }),
+    });
+  }
+
+  return feedbackOut(saved);
+}
+
 Deno.serve(async (req: Request) => {
   const origin = req.headers.get("origin") || "";
   const method = req.method.toUpperCase();
@@ -111,9 +182,10 @@ Deno.serve(async (req: Request) => {
       return json({
         ok: true,
         service: "lead-radar-api",
-        version: "1.0-gateway",
+        version: "1.1-feedback",
         ingest_service: "lead-radar-ingest",
         classifier: "canonical-policy",
+        feedback: "enabled",
         timestamp: new Date().toISOString(),
         ai_provider: "rules",
       }, 200, origin);
@@ -143,6 +215,20 @@ Deno.serve(async (req: Request) => {
       return json(out(rows[0]), 200, origin);
     }
 
+    if (method === "GET" && path === "/api/v1/feedback") {
+      return json(await listFeedback(url), 200, origin);
+    }
+
+    if (method === "POST" && path === "/api/v1/feedback") {
+      if (!ALLOWED.has(origin)) return json({ detail: "Write origin required" }, 403, origin);
+      try {
+        return json({ ok: true, feedback: await saveFeedback(await req.json()) }, 200, origin);
+      } catch (error) {
+        if (error instanceof TypeError) return json({ detail: error.message }, 422, origin);
+        throw error;
+      }
+    }
+
     if (method === "POST" && path === "/api/v1/ingest/manual") {
       if (!ALLOWED.has(origin)) return json({ detail: "Write origin required" }, 403, origin);
       const body = await req.json();
@@ -161,7 +247,8 @@ Deno.serve(async (req: Request) => {
         ai_provider: "rules",
         notification_enabled: Boolean(Deno.env.get("FEISHU_WEBHOOK_URL") || ""),
         ingest_service: "lead-radar-ingest",
-        note: "All candidate ingestion paths delegate to the canonical policy service. Source collection and classification are separate components.",
+        feedback_enabled: true,
+        note: "All candidate ingestion paths delegate to the canonical policy service. Human review is persisted separately as evaluation feedback.",
       }, 200, origin);
     }
 
