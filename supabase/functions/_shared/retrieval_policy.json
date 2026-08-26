@@ -1,0 +1,43 @@
+{
+  "version": "2.0.0",
+  "freshness_minutes": 1440,
+  "scheduler": {
+    "interval_minutes": 15,
+    "exploration": 0.42,
+    "query_cooldown_minutes": 120,
+    "saturation_cooldown_minutes": 360,
+    "duplicate_saturation_threshold": 0.65,
+    "max_queries_web": 2,
+    "max_queries_auto": 1,
+    "max_pages_per_query": 2,
+    "max_provider_calls_web": 3,
+    "max_provider_calls_auto": 1,
+    "min_page_fill_for_pagination": 16,
+    "page_frontier_margin_minutes": 60,
+    "lane_mix": {
+      "precision": 0.62,
+      "discovery": 0.30,
+      "broad": 0.08
+    }
+  },
+  "lanes": {
+    "precision": {
+      "prior": 1.0,
+      "use_intent_templates": true
+    },
+    "discovery": {
+      "prior": 0.82,
+      "templates": [
+        "{topic} 求助",
+        "有没有人会做{topic}",
+        "有懂{topic}的吗",
+        "想弄个{topic}"
+      ]
+    },
+    "broad": {
+      "prior": 0.46,
+      "templates": ["{topic}"]
+    }
+  },
+  "alias_prior_decay": 0.90
+}
