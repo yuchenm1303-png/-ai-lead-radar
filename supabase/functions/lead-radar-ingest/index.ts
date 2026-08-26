@@ -1,5 +1,16 @@
 import { assessText, POLICY_VERSION, type PolicyAssessment } from "../_shared/lead_policy.ts";
 import { RETRIEVAL_VERSION } from "../_shared/retrieval_policy.ts";
+import {
+  classifySemanticBatch,
+  decideSemantic,
+  hardGuardrail,
+  providerReady,
+  DEFAULT_SEMANTIC_MODEL,
+  INTELLIGENCE_VERSION,
+  type IntelligenceSettings,
+  type SemanticAssessment,
+  type SemanticDecision,
+} from "../_shared/semantic_intent.ts";
 
 const SB_URL = Deno.env.get("SUPABASE_URL") || "";
 const LEGACY_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
@@ -48,10 +59,22 @@ function safeUrl(value: unknown): string | null {
   }
 }
 
+function firstText(object: any, keys: string[]) {
+  if (!object || typeof object !== "object") return "";
+  for (const key of keys) {
+    const value = object[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
 function normalizeItem(input: any) {
   const title = String(input?.title || "").trim().slice(0, 240);
   if (!title) return null;
   const published = new Date(input?.published_at || Date.now());
+  const author = input?.author && typeof input.author === "object" ? input.author : {};
+  const authorId = String(input?.author_id || firstText(author, ["id", "user_id", "userId", "userid"]) || "").trim().slice(0, 160) || null;
+  const authorName = String(input?.author_name || firstText(author, ["nickname", "nick_name", "name", "user_name", "userName"]) || "").trim().slice(0, 120) || null;
   return {
     source: String(input?.source || "manual").trim().slice(0, 40) || "manual",
     external_id: input?.external_id ? String(input.external_id).trim().slice(0, 160) : null,
@@ -60,6 +83,8 @@ function normalizeItem(input: any) {
     url: safeUrl(input?.url),
     published_at: Number.isFinite(published.getTime()) ? published.toISOString() : new Date().toISOString(),
     budget: input?.budget ? String(input.budget).trim().slice(0, 100) : null,
+    author_id: authorId,
+    author_name: authorName,
   };
 }
 
@@ -71,6 +96,16 @@ async function sha256(value: string) {
 function identity(item: any) {
   if (item.external_id) return `${item.source}|id:${item.external_id}`;
   return `${item.source}|url:${item.url || ""}|title:${item.title.toLowerCase()}`;
+}
+
+async function semanticContentHash(item: any) {
+  return await sha256([
+    item.source,
+    item.title,
+    item.excerpt,
+    item.author_id || "",
+    item.author_name || "",
+  ].join("\n"));
 }
 
 async function findSeen(item: any, dedupeKey: string) {
@@ -89,13 +124,27 @@ async function createSeen(item: any, dedupeKey: string) {
       source_id: item.external_id,
       dedupe_key: dedupeKey,
       disposition: "seen",
-      metadata: { published_at: item.published_at, url: item.url, policy_version: POLICY_VERSION },
+      metadata: {
+        published_at: item.published_at,
+        url: item.url,
+        author_id: item.author_id,
+        author_name: item.author_name,
+        policy_version: POLICY_VERSION,
+        intelligence_version: INTELLIGENCE_VERSION,
+      },
     }),
   });
   return rows?.[0] || null;
 }
 
-async function updateSeen(id: number, disposition: string, leadId: number | null, assessment: PolicyAssessment | null) {
+async function updateSeen(
+  id: number,
+  disposition: string,
+  leadId: number | null,
+  assessment: PolicyAssessment | null,
+  semantic: SemanticAssessment | null = null,
+  semanticDecision: SemanticDecision | null = null,
+) {
   await rest(`lead_radar_seen_items?id=eq.${id}`, {
     method: "PATCH",
     headers: { Prefer: "return=minimal" },
@@ -108,9 +157,136 @@ async function updateSeen(id: number, disposition: string, leadId: number | null
         actor_role: assessment.actor_role,
         buying_stage: assessment.buying_stage,
         reason_codes: assessment.reason_codes,
+        intelligence_version: INTELLIGENCE_VERSION,
+        semantic_actor_role: semantic?.actor_role || null,
+        transaction_direction: semantic?.transaction_direction || null,
+        buyer_probability: semantic?.buyer_probability ?? null,
+        semantic_confidence: semantic?.confidence ?? null,
+        semantic_decision: semanticDecision,
       } : undefined,
     }),
   });
+}
+
+function clampInt(value: unknown, fallback: number, min = 0, max = 100) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.round(number))) : fallback;
+}
+
+async function intelligenceSettings(): Promise<IntelligenceSettings> {
+  const defaults: IntelligenceSettings = {
+    enabled: false,
+    mode: "shadow",
+    provider: "openai",
+    model: (Deno.env.get("LEAD_SEMANTIC_MODEL") || DEFAULT_SEMANTIC_MODEL).trim() || DEFAULT_SEMANTIC_MODEL,
+    buyer_threshold: 72,
+    min_confidence: 65,
+    reject_confidence: 75,
+    max_items_per_batch: 20,
+  };
+  try {
+    const rows = await rest("lead_radar_intelligence_settings?id=eq.1&select=semantic_enabled,semantic_mode,provider,model,buyer_threshold,min_confidence,reject_confidence,max_items_per_batch&limit=1");
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return defaults;
+    const mode = ["off", "shadow", "enforce"].includes(String(row.semantic_mode)) ? String(row.semantic_mode) as IntelligenceSettings["mode"] : defaults.mode;
+    return {
+      enabled: Boolean(row.semantic_enabled),
+      mode,
+      provider: "openai",
+      model: String(row.model || defaults.model).trim().slice(0, 120) || defaults.model,
+      buyer_threshold: clampInt(row.buyer_threshold, defaults.buyer_threshold),
+      min_confidence: clampInt(row.min_confidence, defaults.min_confidence),
+      reject_confidence: clampInt(row.reject_confidence, defaults.reject_confidence),
+      max_items_per_batch: clampInt(row.max_items_per_batch, defaults.max_items_per_batch, 1, 40),
+    };
+  } catch (error) {
+    console.warn("intelligence settings unavailable", String(error));
+    return defaults;
+  }
+}
+
+function semanticFromRow(row: any): SemanticAssessment | null {
+  if (!row) return null;
+  const id = String(row.source_id || row.content_hash || "").trim();
+  if (!id) return null;
+  return {
+    id,
+    actor_role: String(row.actor_role || "unknown") as SemanticAssessment["actor_role"],
+    transaction_direction: String(row.transaction_direction || "unknown") as SemanticAssessment["transaction_direction"],
+    buyer_probability: clampInt(row.buyer_probability, 0),
+    confidence: clampInt(row.confidence, 0),
+    project_specificity: clampInt(row.project_specificity, 0),
+    reason: String(row.reason || "").slice(0, 220),
+    evidence: (Array.isArray(row.evidence) ? row.evidence : []).map(String).slice(0, 4),
+  };
+}
+
+async function cachedSemantic(item: any, contentHash: string, settings: IntelligenceSettings) {
+  try {
+    const rows = await rest(`lead_radar_semantic_assessments?content_hash=eq.${contentHash}&intelligence_version=eq.${encodeURIComponent(INTELLIGENCE_VERSION)}&provider=eq.${encodeURIComponent(settings.provider)}&model=eq.${encodeURIComponent(settings.model)}&select=source_id,content_hash,actor_role,transaction_direction,buyer_probability,confidence,project_specificity,reason,evidence&limit=1`);
+    const row = Array.isArray(rows) ? rows[0] : null;
+    const assessment = semanticFromRow(row);
+    if (!assessment) return null;
+    return { ...assessment, id: String(item.external_id || contentHash) };
+  } catch {
+    return null;
+  }
+}
+
+async function persistSemantic(
+  item: any,
+  contentHash: string,
+  settings: IntelligenceSettings,
+  semantic: SemanticAssessment,
+  decision: SemanticDecision,
+) {
+  try {
+    await rest("lead_radar_semantic_assessments?on_conflict=content_hash,intelligence_version,provider,model", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify({
+        source: item.source,
+        source_id: item.external_id,
+        content_hash: contentHash,
+        intelligence_version: INTELLIGENCE_VERSION,
+        policy_version: POLICY_VERSION,
+        provider: settings.provider,
+        model: settings.model,
+        actor_role: semantic.actor_role,
+        transaction_direction: semantic.transaction_direction,
+        buyer_probability: semantic.buyer_probability,
+        confidence: semantic.confidence,
+        project_specificity: semantic.project_specificity,
+        semantic_decision: decision,
+        reason: semantic.reason,
+        evidence: semantic.evidence,
+      }),
+    });
+  } catch (error) {
+    console.warn("semantic assessment persist failed", String(error));
+  }
+}
+
+function mergeAcceptedSemantic(assessment: PolicyAssessment, semantic: SemanticAssessment): PolicyAssessment {
+  const stage = assessment.buying_stage === "none" ? "considering" : assessment.buying_stage;
+  const intentFloor = semantic.buyer_probability >= 90 ? 88 : semantic.buyer_probability >= 80 ? 82 : 72;
+  const actionabilityFloor = semantic.project_specificity >= 75 ? 86 : semantic.project_specificity >= 50 ? 78 : 72;
+  return {
+    ...assessment,
+    actor_role: "buyer",
+    buying_stage: stage,
+    is_lead: true,
+    intent_score: Math.max(assessment.intent_score, intentFloor),
+    actionability_score: Math.max(assessment.actionability_score, actionabilityFloor),
+    confidence: Math.max(assessment.confidence, semantic.confidence),
+    reason_codes: [...new Set([
+      ...assessment.reason_codes,
+      "semantic:buyer",
+      "semantic:direction_buy",
+      `semantic:buyer_probability_${semantic.buyer_probability}`,
+    ])].slice(0, 16),
+    evidence: [...new Set([...assessment.evidence, ...semantic.evidence])].slice(0, 8),
+  };
 }
 
 function freshnessScore(publishedAt: string) {
@@ -131,7 +307,7 @@ function urgency(text: string) {
   return "low";
 }
 
-function finalScore(item: any, assessment: PolicyAssessment) {
+function finalScore(item: any, assessment: PolicyAssessment, semantic: SemanticAssessment | null = null) {
   const freshness = freshnessScore(item.published_at);
   let intent = assessment.intent_score;
   let actionability = assessment.actionability_score;
@@ -139,20 +315,29 @@ function finalScore(item: any, assessment: PolicyAssessment) {
     intent = Math.max(intent, 82);
     actionability = Math.max(actionability, 88);
   }
+  if (semantic?.actor_role === "buyer" && semantic.transaction_direction === "buy") {
+    actionability = Math.max(actionability, semantic.project_specificity);
+  }
   const score = Math.max(0, Math.min(100, Math.round(intent * 0.40 + assessment.fit_score * 0.20 + freshness * 0.20 + actionability * 0.20)));
   return { score, freshness, intent, actionability };
 }
 
-async function insertLead(item: any, assessment: PolicyAssessment, dedupeKey: string) {
-  const scored = finalScore(item, assessment);
+async function insertLead(item: any, assessment: PolicyAssessment, dedupeKey: string, semantic: SemanticAssessment | null = null, settings: IntelligenceSettings | null = null) {
+  const scored = finalScore(item, assessment, semantic);
   const urgencyValue = urgency(`${item.title} ${item.excerpt}`);
   const priority = scored.score >= 85 ? "high" : scored.score >= 70 ? "medium" : "low";
   const reason = [
     `角色=${assessment.actor_role}`,
     `阶段=${assessment.buying_stage}`,
     `类型=${assessment.category}`,
+    semantic ? `语义=${semantic.actor_role}/${semantic.transaction_direction}/${semantic.buyer_probability}` : null,
     `policy=${assessment.policy_version}`,
-  ].join("；");
+    `intelligence=${INTELLIGENCE_VERSION}`,
+  ].filter(Boolean).join("；");
+  const signals = [...new Set([
+    ...assessment.reason_codes,
+    ...(semantic ? [`semantic:${semantic.actor_role}`, `direction:${semantic.transaction_direction}`] : []),
+  ])].slice(0, 16);
   const rows = await rest("lead_radar_leads?select=*", {
     method: "POST",
     headers: { Prefer: "return=representation" },
@@ -170,16 +355,25 @@ async function insertLead(item: any, assessment: PolicyAssessment, dedupeKey: st
       freshness_score: scored.freshness,
       ai_score: scored.score,
       urgency: urgencyValue,
-      confidence: assessment.confidence,
+      confidence: semantic ? Math.max(assessment.confidence, semantic.confidence) : assessment.confidence,
       priority,
       budget_text: item.budget,
       reason,
-      signals: assessment.reason_codes.slice(0, 12),
+      signals,
       actor_role: assessment.actor_role,
       buying_stage: assessment.buying_stage,
       actionability_score: scored.actionability,
       policy_version: assessment.policy_version,
       dedupe_key: dedupeKey,
+      author_id: item.author_id,
+      author_name: item.author_name,
+      semantic_actor_role: semantic?.actor_role || null,
+      transaction_direction: semantic?.transaction_direction || null,
+      buyer_probability: semantic?.buyer_probability ?? null,
+      semantic_confidence: semantic?.confidence ?? null,
+      project_specificity: semantic?.project_specificity ?? null,
+      intelligence_version: INTELLIGENCE_VERSION,
+      semantic_model: semantic ? settings?.model || DEFAULT_SEMANTIC_MODEL : null,
     }),
   });
   return rows?.[0] || null;
@@ -292,9 +486,13 @@ async function recordQueryRun(context: any, items: any[], decisions: any[], coun
 async function ingest(payload: any) {
   const rawItems = Array.isArray(payload?.items) ? payload.items : [];
   const items = rawItems.map(normalizeItem).filter(Boolean).slice(0, 100);
+  const settings = await intelligenceSettings();
+  const semanticActive = settings.enabled && settings.mode !== "off" && providerReady();
   const decisions: any[] = [];
   let stored = 0, filtered = 0, duplicates = 0, notified = 0;
+  let semanticCandidates = 0, semanticCalls = 0, semanticCached = 0, semanticRejected = 0, semanticUncertain = 0;
   const leadIds: number[] = [];
+  const pending: any[] = [];
 
   for (const item of items) {
     const dedupeKey = await sha256(identity(item));
@@ -308,45 +506,159 @@ async function ingest(payload: any) {
 
     const seen = first || await createSeen(item, dedupeKey);
     if (!seen?.id) throw new Error("failed to create seen item");
-    try {
-      const assessment = assessText(item.title, item.excerpt);
-      if (!assessment.is_lead) {
-        filtered += 1;
-        await updateSeen(Number(seen.id), "filtered", null, assessment);
-        decisions.push({ external_id: item.external_id, disposition: "filtered", lead_id: null, assessment });
-        continue;
-      }
+    const assessment = assessText(item.title, item.excerpt);
+    const guardrail = hardGuardrail(assessment);
+    if (guardrail.action === "reject") {
+      filtered += 1;
+      await updateSeen(Number(seen.id), "filtered", null, assessment);
+      decisions.push({
+        external_id: item.external_id,
+        disposition: "filtered",
+        lead_id: null,
+        assessment,
+        intelligence: { route: "hard_guardrail", reason: guardrail.reason },
+      });
+      continue;
+    }
+    pending.push({ item, seen, dedupeKey, assessment, contentHash: await semanticContentHash(item) });
+  }
 
-      const lead = await insertLead(item, assessment, dedupeKey);
+  const semanticById = new Map<string, SemanticAssessment>();
+  if (semanticActive && pending.length) {
+    semanticCandidates = pending.length;
+    const uncached: any[] = [];
+    for (const entry of pending) {
+      const cached = await cachedSemantic(entry.item, entry.contentHash, settings);
+      if (cached) {
+        semanticCached += 1;
+        semanticById.set(String(entry.item.external_id || entry.contentHash), cached);
+      } else uncached.push(entry);
+    }
+
+    for (let offset = 0; offset < uncached.length; offset += settings.max_items_per_batch) {
+      const chunk = uncached.slice(offset, offset + settings.max_items_per_batch);
+      try {
+        semanticCalls += 1;
+        const classified = await classifySemanticBatch(chunk.map((entry) => ({
+          id: String(entry.item.external_id || entry.contentHash),
+          title: entry.item.title,
+          excerpt: entry.item.excerpt,
+          author_name: entry.item.author_name,
+        })), settings);
+        for (const [id, semantic] of classified.entries()) semanticById.set(id, semantic);
+      } catch (error) {
+        console.warn("semantic classification failed; falling back to policy", String(error));
+      }
+    }
+  }
+
+  for (const entry of pending) {
+    const { item, seen, dedupeKey } = entry;
+    let assessment: PolicyAssessment = entry.assessment;
+    const semantic = semanticById.get(String(item.external_id || entry.contentHash)) || null;
+    let semanticDecision: SemanticDecision | null = semantic ? decideSemantic(semantic, settings) : null;
+    if (semantic && !semanticCached) await persistSemantic(item, entry.contentHash, settings, semantic, semanticDecision || "uncertain");
+
+    let shouldStore = assessment.is_lead;
+    let dispositionReason = "policy";
+    if (settings.enabled && settings.mode === "enforce" && semantic) {
+      shouldStore = semanticDecision === "accept";
+      dispositionReason = `semantic:${semanticDecision}`;
+      if (semanticDecision === "accept") assessment = mergeAcceptedSemantic(assessment, semantic);
+      else if (semanticDecision === "reject") semanticRejected += 1;
+      else semanticUncertain += 1;
+    } else if (settings.enabled && settings.mode === "shadow" && semantic) {
+      dispositionReason = `semantic_shadow:${semanticDecision}`;
+    } else if (settings.enabled && !semanticActive) {
+      dispositionReason = "semantic_unavailable_policy_fallback";
+    }
+
+    if (!shouldStore) {
+      filtered += 1;
+      await updateSeen(Number(seen.id), "filtered", null, assessment, semantic, semanticDecision);
+      decisions.push({
+        external_id: item.external_id,
+        disposition: "filtered",
+        lead_id: null,
+        assessment,
+        semantic,
+        semantic_decision: semanticDecision,
+        intelligence: { route: dispositionReason },
+      });
+      if (semantic) await persistSemantic(item, entry.contentHash, settings, semantic, semanticDecision || "uncertain");
+      continue;
+    }
+
+    try {
+      const lead = await insertLead(item, assessment, dedupeKey, semantic, settings);
       if (!lead?.id) throw new Error("lead insert returned no id");
       stored += 1;
       leadIds.push(Number(lead.id));
-      await updateSeen(Number(seen.id), "stored", Number(lead.id), assessment);
+      await updateSeen(Number(seen.id), "stored", Number(lead.id), assessment, semantic, semanticDecision);
       if (await notifyLead(lead)) notified += 1;
-      decisions.push({ external_id: item.external_id, disposition: "stored", lead_id: Number(lead.id), assessment, score: Number(lead.ai_score || 0) });
+      decisions.push({
+        external_id: item.external_id,
+        disposition: "stored",
+        lead_id: Number(lead.id),
+        assessment,
+        semantic,
+        semantic_decision: semanticDecision,
+        intelligence: { route: dispositionReason },
+        score: Number(lead.ai_score || 0),
+      });
+      if (semantic) await persistSemantic(item, entry.contentHash, settings, semantic, semanticDecision || "accept");
     } catch (error) {
-      await updateSeen(Number(seen.id), "error", null, null);
+      await updateSeen(Number(seen.id), "error", null, assessment, semantic, semanticDecision);
       decisions.push({ external_id: item.external_id, disposition: "error", lead_id: null, error: String(error).slice(0, 300) });
     }
   }
 
-  const counts = { received: items.length, stored, filtered, duplicates, notified, lead_ids: leadIds };
+  const counts = {
+    received: items.length,
+    stored,
+    filtered,
+    duplicates,
+    notified,
+    lead_ids: leadIds,
+    semantic_candidates: semanticCandidates,
+    semantic_calls: semanticCalls,
+    semantic_cached: semanticCached,
+    semantic_rejected: semanticRejected,
+    semantic_uncertain: semanticUncertain,
+  };
   await recordQueryMetric(payload?.query_context || null, counts);
   await recordQueryRun(payload?.query_context || null, items, decisions, counts);
-  return { ok: true, policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION, ...counts, decisions };
+  return {
+    ok: true,
+    policy_version: POLICY_VERSION,
+    retrieval_version: RETRIEVAL_VERSION,
+    intelligence_version: INTELLIGENCE_VERSION,
+    semantic: { enabled: settings.enabled, mode: settings.mode, provider_ready: providerReady(), model: settings.model },
+    ...counts,
+    decisions,
+  };
 }
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") return new Response(null, { status: 204 });
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname.endsWith("/health")) {
-    return json({ ok: true, service: "lead-radar-ingest", policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION, auth: "server-to-server" });
+    const settings = await intelligenceSettings();
+    return json({
+      ok: true,
+      service: "lead-radar-ingest",
+      policy_version: POLICY_VERSION,
+      retrieval_version: RETRIEVAL_VERSION,
+      intelligence_version: INTELLIGENCE_VERSION,
+      semantic: { enabled: settings.enabled, mode: settings.mode, provider_ready: providerReady(), model: settings.model },
+      auth: "server-to-server",
+    });
   }
   if (!authorized(request)) return json({ detail: "Unauthorized" }, 401);
   if (request.method !== "POST" || !url.pathname.endsWith("/api/v1/ingest")) return json({ detail: "Not found" }, 404);
   try {
     return json(await ingest(await request.json()));
   } catch (error) {
-    return json({ detail: String(error).slice(0, 500), policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION }, 500);
+    return json({ detail: String(error).slice(0, 500), policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION, intelligence_version: INTELLIGENCE_VERSION }, 500);
   }
 });
