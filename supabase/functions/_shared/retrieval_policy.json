@@ -1,6 +1,21 @@
 {
   "version": "2.0.0",
   "freshness_minutes": 1440,
+  "topic_terms": {
+    "mini_program": ["小程序", "微信小程序"],
+    "website": ["网站", "官网"],
+    "independent_site": ["独立站", "英文官网"],
+    "management_system": ["管理系统", "后台系统"],
+    "ai_agent": ["AI智能体", "智能体"],
+    "automation": ["自动化", "工作流自动化"],
+    "python_data": ["Python", "脚本", "爬虫"]
+  },
+  "precision_templates": {
+    "explicit_outsource": ["找人做{topic}", "{topic} 找开发", "{topic} 外包"],
+    "paid_request": ["{topic} 有偿", "{topic} 预算可聊"],
+    "build_intent": ["需要做{topic}", "想做{topic}"],
+    "problem_help": ["{topic} 急需", "{topic} 二开"]
+  },
   "scheduler": {
     "interval_minutes": 15,
     "exploration": 0.42,
@@ -22,8 +37,7 @@
   },
   "lanes": {
     "precision": {
-      "prior": 1.0,
-      "use_intent_templates": true
+      "prior": 1.0
     },
     "discovery": {
       "prior": 0.82,
