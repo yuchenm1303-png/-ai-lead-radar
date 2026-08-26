@@ -1,6 +1,5 @@
 import json
 import unittest
-from pathlib import Path
 
 from app.domain import ActorRole
 from app.policy import POLICY_PATH, assess_text, evaluate_gold_set, load_policy
@@ -16,10 +15,25 @@ class PolicyGoldSetTests(unittest.TestCase):
 
     def test_gold_set_quality_gate(self):
         metrics = evaluate_gold_set(self.samples)
-        self.assertGreaterEqual(metrics["precision"], 0.95, metrics)
-        self.assertGreaterEqual(metrics["recall"], 0.95, metrics)
-        self.assertGreaterEqual(metrics["f1"], 0.95, metrics)
-        self.assertGreaterEqual(metrics["actor_accuracy"], 0.80, metrics)
+        mistakes = []
+        for sample in self.samples:
+            assessment = assess_text(sample.get("title", ""), sample.get("excerpt", ""))
+            expected_lead = sample.get("label") == "lead"
+            expected_role = sample.get("actor_role")
+            if assessment.is_lead != expected_lead or assessment.actor_role.value != expected_role:
+                mistakes.append({
+                    "id": sample.get("id"),
+                    "expected_label": sample.get("label"),
+                    "actual_lead": assessment.is_lead,
+                    "expected_role": expected_role,
+                    "actual_role": assessment.actor_role.value,
+                    "reason_codes": assessment.reason_codes,
+                })
+        message = {"metrics": metrics, "mistakes": mistakes}
+        self.assertGreaterEqual(metrics["precision"], 0.95, message)
+        self.assertGreaterEqual(metrics["recall"], 0.95, message)
+        self.assertGreaterEqual(metrics["f1"], 0.95, message)
+        self.assertGreaterEqual(metrics["actor_accuracy"], 0.80, message)
 
     def test_service_provider_is_not_buyer(self):
         assessment = assess_text(
