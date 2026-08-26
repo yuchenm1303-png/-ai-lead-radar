@@ -1,5 +1,69 @@
 [
   {
+    "id": "buyer-paid-school-website",
+    "title": "学校比赛需要做个网站，有偿",
+    "excerpt": "预算可以聊，想尽快上线",
+    "label": "lead",
+    "actor_role": "buyer",
+    "transaction_direction": "buy"
+  },
+  {
+    "id": "buyer-ai-agent-team",
+    "title": "寻找AI智能体开发团队或个人，要求产品做成网页端登录使用",
+    "excerpt": "围绕社交媒体寻找潜在客户并推送，其他细节进一步沟通",
+    "label": "lead",
+    "actor_role": "buyer",
+    "transaction_direction": "buy"
+  },
+  {
+    "id": "buyer-mini-program-commerce",
+    "title": "急！需要icp+edi，小程序，知识付费，在线交易",
+    "excerpt": "其他细节可以沟通",
+    "label": "lead",
+    "actor_role": "buyer",
+    "transaction_direction": "buy"
+  },
+  {
+    "id": "buyer-course-website",
+    "title": "找人开发在线课程网站",
+    "excerpt": "需要后台、登录和内容管理，预算可聊",
+    "label": "lead",
+    "actor_role": "buyer",
+    "transaction_direction": "buy"
+  },
+  {
+    "id": "buyer-paid-wechat",
+    "title": "有没有人会做微信小程序，有偿",
+    "excerpt": "预约系统，比较急",
+    "label": "lead",
+    "actor_role": "buyer",
+    "transaction_direction": "buy"
+  },
+  {
+    "id": "buyer-company-official-site",
+    "title": "公司找开发做官网",
+    "excerpt": "有偿，尽快，需要中英文页面",
+    "label": "lead",
+    "actor_role": "buyer",
+    "transaction_direction": "buy"
+  },
+  {
+    "id": "buyer-system-secondary-dev",
+    "title": "现有管理系统想二开，有人能做吗",
+    "excerpt": "需要改权限和报表功能，价格可聊",
+    "label": "lead",
+    "actor_role": "buyer",
+    "transaction_direction": "buy"
+  },
+  {
+    "id": "buyer-automation-workflow",
+    "title": "想做一个自动化工作流",
+    "excerpt": "有没有会做的，预算面议",
+    "label": "lead",
+    "actor_role": "buyer",
+    "transaction_direction": "buy"
+  },
+  {
     "id": "buyer-hangzhou-mini-program",
     "title": "寻找杭州本地小程序开发的公司或者个人",
     "excerpt": "【诚找杭州本地小程序开发服务商】因公司数字化升级需求，长期寻找杭州深耕小程序定制开发的正规技术公司。",
