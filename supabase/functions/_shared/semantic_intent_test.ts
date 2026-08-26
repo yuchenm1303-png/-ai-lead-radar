@@ -1,6 +1,8 @@
 import { assessText, type PolicyAssessment } from "./lead_policy.ts";
 import {
+  buildMiniMaxSemanticRequest,
   buildSemanticRequest,
+  classifySemanticBatch,
   decideSemantic,
   hardGuardrail,
   type IntelligenceSettings,
@@ -72,7 +74,7 @@ Deno.test("semantic decision requires transaction direction, probability, and co
   assert(decideSemantic(ambiguous, settings) === "uncertain", "ambiguous content should remain review-only");
 });
 
-Deno.test("semantic request is batched and uses strict structured output", () => {
+Deno.test("OpenAI semantic request is batched and uses strict structured output", () => {
   const request = buildSemanticRequest([
     { id: "1", title: "寻找杭州本地小程序开发的公司或者个人", excerpt: "公司数字化升级需求", author_name: "小红薯" },
     { id: "2", title: "小程序接定制开发", excerpt: "全行业都能做", author_name: "开发工作室" },
@@ -82,4 +84,45 @@ Deno.test("semantic request is batched and uses strict structured output", () =>
   assert(request.text?.format?.strict === true, "structured output must be strict");
   const input = JSON.parse(request.input);
   assert(input.items.length === 2, "batch should contain both candidates");
+});
+
+Deno.test("MiniMax request is batched through Anthropic-compatible messages", () => {
+  const request = buildMiniMaxSemanticRequest([
+    { id: "1", title: "公司找人做官网", excerpt: "需要中英文页面，预算可聊" },
+    { id: "2", title: "承接网站开发", excerpt: "企业官网和商城都能做" },
+  ], "MiniMax-M2.7") as any;
+  assert(request.model === "MiniMax-M2.7", "MiniMax model mismatch");
+  assert(Array.isArray(request.messages) && request.messages.length === 1, "MiniMax should use one batched user message");
+  const payload = JSON.parse(request.messages[0].content[0].text);
+  assert(payload.items.length === 2, "MiniMax batch should contain both candidates");
+});
+
+Deno.test("MiniMax provider parses text JSON without exposing the credential", async () => {
+  const minimaxSettings: IntelligenceSettings = { ...settings, provider: "minimax", model: "MiniMax-M2.7" };
+  let authorization = "";
+  const fakeFetch: typeof fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+    authorization = new Headers(init?.headers).get("authorization") || "";
+    return new Response(JSON.stringify({
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          items: [{
+            id: "buyer-1",
+            actor_role: "buyer",
+            transaction_direction: "buy",
+            buyer_probability: 96,
+            confidence: 94,
+            project_specificity: 85,
+            reason: "author seeks custom development",
+            evidence: ["找人做官网", "预算可聊"],
+          }],
+        }),
+      }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const result = await classifySemanticBatch([
+    { id: "buyer-1", title: "公司找人做官网", excerpt: "预算可聊" },
+  ], minimaxSettings, "test-secret", fakeFetch);
+  assert(authorization === "Bearer test-secret", "MiniMax must use Bearer authorization");
+  assert(result.get("buyer-1")?.buyer_probability === 96, "MiniMax response should normalize into semantic assessment");
 });
