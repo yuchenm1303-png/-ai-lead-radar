@@ -43,8 +43,11 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+      - run: deno check supabase/functions/_shared/lead_policy.ts
+      - run: deno check supabase/functions/lead-radar-ingest/index.ts
       - run: deno check supabase/functions/lead-radar-collector/index.ts
       - run: deno check supabase/functions/lead-radar-scan/index.ts
+      - run: deno test supabase/functions/_shared/lead_policy_test.ts
       - run: deno test supabase/functions/lead-radar-scan/preview_contract_test.ts
 
   browser-helper:
