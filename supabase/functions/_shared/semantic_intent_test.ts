@@ -86,43 +86,48 @@ Deno.test("OpenAI semantic request is batched and uses strict structured output"
   assert(input.items.length === 2, "batch should contain both candidates");
 });
 
-Deno.test("MiniMax request is batched through Anthropic-compatible messages", () => {
+Deno.test("MiniMax Token Plan request is batched through chatcompletion_v2 format", () => {
   const request = buildMiniMaxSemanticRequest([
     { id: "1", title: "公司找人做官网", excerpt: "需要中英文页面，预算可聊" },
     { id: "2", title: "承接网站开发", excerpt: "企业官网和商城都能做" },
   ], "MiniMax-M2.7") as any;
   assert(request.model === "MiniMax-M2.7", "MiniMax model mismatch");
-  assert(Array.isArray(request.messages) && request.messages.length === 1, "MiniMax should use one batched user message");
-  const payload = JSON.parse(request.messages[0].content[0].text);
+  assert(Array.isArray(request.messages) && request.messages.length === 2, "MiniMax should use system + one batched user message");
+  const payload = JSON.parse(request.messages[1].content);
   assert(payload.items.length === 2, "MiniMax batch should contain both candidates");
 });
 
-Deno.test("MiniMax provider parses text JSON without exposing the credential", async () => {
+Deno.test("MiniMax provider parses chatcompletion JSON without exposing the credential", async () => {
   const minimaxSettings: IntelligenceSettings = { ...settings, provider: "minimax", model: "MiniMax-M2.7" };
   let authorization = "";
-  const fakeFetch: typeof fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+  let calledUrl = "";
+  const fakeFetch: typeof fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    calledUrl = String(input);
     authorization = new Headers(init?.headers).get("authorization") || "";
     return new Response(JSON.stringify({
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          items: [{
-            id: "buyer-1",
-            actor_role: "buyer",
-            transaction_direction: "buy",
-            buyer_probability: 96,
-            confidence: 94,
-            project_specificity: 85,
-            reason: "author seeks custom development",
-            evidence: ["找人做官网", "预算可聊"],
-          }],
-        }),
+      choices: [{
+        message: {
+          content: `\`\`\`json\n${JSON.stringify({
+            items: [{
+              id: "buyer-1",
+              actor_role: "buyer",
+              transaction_direction: "buy",
+              buyer_probability: 96,
+              confidence: 94,
+              project_specificity: 85,
+              reason: "author seeks custom development",
+              evidence: ["找人做官网", "预算可聊"],
+            }],
+          })}\n\`\`\``,
+        },
       }],
+      base_resp: { status_code: 0, status_msg: "" },
     }), { status: 200, headers: { "content-type": "application/json" } });
   };
   const result = await classifySemanticBatch([
     { id: "buyer-1", title: "公司找人做官网", excerpt: "预算可聊" },
   ], minimaxSettings, "test-secret", fakeFetch);
+  assert(calledUrl === "https://api.minimaxi.com/v1/text/chatcompletion_v2", `unexpected MiniMax endpoint=${calledUrl}`);
   assert(authorization === "Bearer test-secret", "MiniMax must use Bearer authorization");
   assert(result.get("buyer-1")?.buyer_probability === 96, "MiniMax response should normalize into semantic assessment");
 });
