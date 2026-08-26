@@ -12,6 +12,8 @@ const JUSTONE_ENDPOINT = (Deno.env.get("JUSTONE_API_ENDPOINT") || "https://api.j
 const MAX_REQUESTS_PER_HOUR = 3;
 const MIN_REQUEST_GAP_MS = 5 * 60 * 1000;
 const MAX_AGE_MINUTES = 24 * 60;
+const MAX_PREVIEW_BODY_CHARS = 12000;
+const MAX_PREVIEW_IMAGES = 9;
 const QUERY_ROTATION = ["小程序", "小程序", "小程序", "网站", "网站", "管理系统", "AI智能体", "软件开发", "自动化"];
 
 function cors(origin = "") {
@@ -31,11 +33,7 @@ function json(data: unknown, status = 200, origin = "") {
 }
 
 function restHeaders(extra: Record<string, string> = {}) {
-  const headers: Record<string, string> = {
-    apikey: SECRET_KEY,
-    "Content-Type": "application/json",
-    ...extra,
-  };
+  const headers: Record<string, string> = { apikey: SECRET_KEY, "Content-Type": "application/json", ...extra };
   if (SECRET_KEY.startsWith("ey")) headers.Authorization = `Bearer ${SECRET_KEY}`;
   return headers;
 }
@@ -111,6 +109,92 @@ function parseTimestamp(value: unknown): Date | null {
   return Number.isFinite(parsed.getTime()) ? parsed : null;
 }
 
+function safeHttpUrl(value: unknown): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(String(value));
+    return ["http:", "https:"].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function firstText(object: any, keys: string[]): string {
+  if (!object || typeof object !== "object") return "";
+  for (const key of keys) {
+    const value = object[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function numericMetric(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.round(value));
+  if (typeof value === "string") {
+    const parsed = Number(value.replace(/,/g, "").trim());
+    return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : null;
+  }
+  return null;
+}
+
+function collectImageUrls(value: unknown, output = new Set<string>(), depth = 0): string[] {
+  if (output.size >= MAX_PREVIEW_IMAGES || depth > 4 || value === null || value === undefined) return [...output];
+  if (typeof value === "string") {
+    const url = safeHttpUrl(value);
+    if (url) output.add(url);
+    return [...output];
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectImageUrls(item, output, depth + 1);
+      if (output.size >= MAX_PREVIEW_IMAGES) break;
+    }
+    return [...output];
+  }
+  if (typeof value === "object") {
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (!/(url|image|original|default|preview|large|small)/i.test(key)) continue;
+      collectImageUrls(item, output, depth + 1);
+      if (output.size >= MAX_PREVIEW_IMAGES) break;
+    }
+  }
+  return [...output];
+}
+
+function extractTags(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const result: string[] = [];
+  for (const item of value) {
+    const text = typeof item === "string" ? item.trim() : firstText(item, ["name", "title", "tag_name", "tagName"]);
+    if (text && !result.includes(text)) result.push(text.slice(0, 80));
+    if (result.length >= 12) break;
+  }
+  return result;
+}
+
+function buildPreview(note: any, id: string, title: string, body: string, published: Date) {
+  const user = note?.user && typeof note.user === "object" ? note.user : {};
+  const nickname = firstText(user, ["nickname", "nick_name", "name", "user_name", "userName"]);
+  const avatar = safeHttpUrl(firstText(user, ["avatar", "avatar_url", "avatarUrl", "image"]));
+  return {
+    id,
+    source: "小红书",
+    title: (title || body.slice(0, 120)).slice(0, 240),
+    body: body.slice(0, MAX_PREVIEW_BODY_CHARS),
+    published_at: published.toISOString(),
+    url: `https://www.xiaohongshu.com/explore/${id}`,
+    author: nickname || avatar ? { nickname: nickname.slice(0, 100), avatar } : null,
+    images: collectImageUrls(note?.images_list ?? note?.images ?? note?.image_list).slice(0, MAX_PREVIEW_IMAGES),
+    metrics: {
+      likes: numericMetric(note?.liked_count ?? note?.likes_count ?? note?.like_count),
+      comments: numericMetric(note?.comments_count ?? note?.comment_count),
+      collects: numericMetric(note?.collected_count ?? note?.collect_count),
+      shares: numericMetric(note?.shared_count ?? note?.share_count),
+    },
+    tags: extractTags(note?.tags),
+  };
+}
+
 async function fetchJustOne(keyword: string) {
   if (!JUSTONE_TOKEN) throw new Error("JUSTONE_API_TOKEN is not configured");
   const url = new URL(JUSTONE_ENDPOINT);
@@ -135,25 +219,28 @@ async function fetchJustOne(keyword: string) {
 
   const notes = Array.isArray(payload?.data?.notes) ? payload.data.notes : [];
   const now = Date.now();
-  const unique = new Map<string, any>();
+  const unique = new Map<string, { item: any; preview: any }>();
   for (const note of notes) {
     if (!note || typeof note !== "object" || Array.isArray(note)) continue;
     const id = String(note.id || "").trim();
     const title = String(note.title || "").trim();
-    const excerpt = String(note.desc || "").trim();
+    const body = String(note.desc || "").trim();
     const published = parseTimestamp(note.timestamp);
-    if (!id || !published || (!title && !excerpt)) continue;
+    if (!id || !published || (!title && !body)) continue;
     const ageMinutes = (now - published.getTime()) / 60000;
-    if (ageMinutes < -5 || ageMinutes > MAX_AGE_MINUTES) continue;
-    if (unique.has(id)) continue;
+    if (ageMinutes < -5 || ageMinutes > MAX_AGE_MINUTES || unique.has(id)) continue;
+    const preview = buildPreview(note, id, title, body, published);
     unique.set(id, {
-      source: "小红书",
-      external_id: id.slice(0, 160),
-      title: (title || excerpt.slice(0, 120)).slice(0, 240),
-      excerpt: excerpt.slice(0, 1600),
-      published_at: published.toISOString(),
-      url: `https://www.xiaohongshu.com/explore/${id}`,
-      budget: null,
+      item: {
+        source: "小红书",
+        external_id: id.slice(0, 160),
+        title: preview.title,
+        excerpt: body.slice(0, 1600),
+        published_at: published.toISOString(),
+        url: preview.url,
+        budget: null,
+      },
+      preview,
     });
   }
   return {
@@ -161,7 +248,8 @@ async function fetchJustOne(keyword: string) {
     raw_count: notes.length,
     fresh_count: unique.size,
     request_id: payload.requestId ? String(payload.requestId).slice(0, 160) : null,
-    items: [...unique.values()],
+    items: [...unique.values()].map((entry) => entry.item),
+    previews: [...unique.values()].map((entry) => entry.preview),
   };
 }
 
@@ -169,11 +257,7 @@ async function ingestItems(items: any[]) {
   if (!items.length) return { received: 0, stored: 0, filtered: 0, duplicates: 0, notified: 0, lead_ids: [] };
   const response = await fetch(`${SB_URL}/functions/v1/lead-radar-api/api/v1/ingest/manual`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      Origin: "https://smirel.com",
-    },
+    headers: { "Content-Type": "application/json", Accept: "application/json", Origin: "https://smirel.com" },
     body: JSON.stringify({ items }),
     signal: AbortSignal.timeout(30000),
   });
@@ -183,6 +267,22 @@ async function ingestItems(items: any[]) {
   catch { payload = { detail: text.slice(0, 200) }; }
   if (!response.ok) throw new Error(`lead-radar-api ${response.status}: ${String(payload.detail || text).slice(0, 220)}`);
   return payload;
+}
+
+async function candidateDecisions(items: any[]) {
+  const ids = items.map((item) => String(item?.external_id || "").trim()).filter(Boolean).slice(0, 100);
+  if (!ids.length) return new Map<string, { disposition: string; lead_id: number | null }>();
+  const rows = await rest(`lead_radar_seen_items?source=eq.${encodeURIComponent("小红书")}&source_id=in.(${ids.join(",")})&select=source_id,disposition,lead_id`);
+  const result = new Map<string, { disposition: string; lead_id: number | null }>();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const sourceId = String(row?.source_id || "");
+    if (!sourceId) continue;
+    result.set(sourceId, {
+      disposition: String(row?.disposition || "seen"),
+      lead_id: Number.isInteger(Number(row?.lead_id)) ? Number(row.lead_id) : null,
+    });
+  }
+  return result;
 }
 
 async function highIntentCount(leadIds: number[]) {
@@ -220,10 +320,15 @@ async function executeDirectScan(requestRow: any) {
   try {
     const source = await fetchJustOne(keyword);
     const ingest = await ingestItems(source.items);
+    const decisions = await candidateDecisions(source.items);
     const leadIds = Array.isArray(ingest?.lead_ids)
       ? ingest.lead_ids.map((value: unknown) => Number(value)).filter((value: number) => Number.isInteger(value) && value > 0).slice(0, 200)
       : [];
     const highIntent = await highIntentCount(leadIds);
+    const posts = source.previews.map((preview: any) => {
+      const decision = decisions.get(String(preview.id)) || { disposition: "unknown", lead_id: null };
+      return { ...preview, decision: decision.disposition, lead_id: decision.lead_id };
+    });
     const finishedAt = new Date().toISOString();
     const result = {
       connector: "justone-xiaohongshu-v4",
@@ -237,6 +342,7 @@ async function executeDirectScan(requestRow: any) {
       high_intent: highIntent,
       lead_ids: leadIds,
       request_id: source.request_id,
+      posts,
       last_scan_at: finishedAt,
     };
     await updateRequest(id, { status: "success", finished_at: finishedAt, result, error_text: null });
@@ -255,6 +361,7 @@ async function executeDirectScan(requestRow: any) {
         scan_request_id: id,
         keyword,
         fresh: source.fresh_count,
+        preview_count: posts.length,
         duplicates: result.duplicates,
         notified: result.notified,
         provider_request_id: source.request_id,
@@ -295,7 +402,7 @@ async function statusPayload() {
   return {
     ok: true,
     service: "lead-radar-scan",
-    version: "0.3-direct-edge",
+    version: "0.4-post-preview",
     mode: JUSTONE_TOKEN ? "direct-edge" : "web-queued-github-worker",
     direct_ready: Boolean(JUSTONE_TOKEN),
     platform: "小红书 · Just One V4",
