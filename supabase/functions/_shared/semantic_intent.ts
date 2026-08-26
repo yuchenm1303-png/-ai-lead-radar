@@ -1,6 +1,6 @@
 import type { ActorRole, PolicyAssessment } from "./lead_policy.ts";
 
-export const INTELLIGENCE_VERSION = "3.1.0";
+export const INTELLIGENCE_VERSION = "3.1.1";
 export type SemanticProvider = "openai" | "minimax";
 export const DEFAULT_SEMANTIC_PROVIDER: SemanticProvider = "openai";
 export const DEFAULT_SEMANTIC_MODELS: Record<SemanticProvider, string> = {
@@ -229,20 +229,22 @@ export function buildMiniMaxSemanticRequest(candidates: SemanticCandidate[], mod
   };
   return {
     model,
-    max_tokens: 6000,
     temperature: 0.1,
-    system: `${SYSTEM_INSTRUCTIONS}\nReturn ONLY one valid JSON object. No markdown fences and no prose outside JSON.`,
-    messages: [{
-      role: "user",
-      content: [{
-        type: "text",
-        text: JSON.stringify({
+    max_completion_tokens: 6000,
+    messages: [
+      {
+        role: "system",
+        content: `${SYSTEM_INSTRUCTIONS}\nReturn ONLY one valid JSON object. No markdown fences and no prose outside JSON.`,
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
           task: "Classify every item and return exactly one result per input id.",
           output_shape: requiredShape,
           items: semanticInput(candidates),
         }),
-      }],
-    }],
+      },
+    ],
   };
 }
 
@@ -263,11 +265,8 @@ function extractOpenAIOutputText(data: any) {
 }
 
 function extractMiniMaxOutputText(data: any) {
-  return (Array.isArray(data?.content) ? data.content : [])
-    .filter((item: any) => item?.type === "text" && typeof item?.text === "string")
-    .map((item: any) => item.text)
-    .join("")
-    .trim();
+  const content = data?.choices?.[0]?.message?.content;
+  return typeof content === "string" ? content.trim() : "";
 }
 
 function stripJsonFence(value: string) {
@@ -332,12 +331,11 @@ async function classifyMiniMax(
   apiKey: string,
   fetchImpl: typeof fetch,
 ) {
-  const response = await fetchImpl("https://api.minimax.io/anthropic/v1/messages", {
+  const response = await fetchImpl("https://api.minimaxi.com/v1/text/chatcompletion_v2", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
-      "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify(buildMiniMaxSemanticRequest(candidates, settings.model || defaultSemanticModel("minimax"))),
     signal: AbortSignal.timeout(30000),
@@ -346,6 +344,9 @@ async function classifyMiniMax(
   if (!response.ok) throw new Error(`minimax semantic provider ${response.status}: ${text.slice(0, 240)}`);
   let data: any;
   try { data = JSON.parse(text); } catch { throw new Error("minimax semantic provider returned invalid JSON"); }
+  if (Number(data?.base_resp?.status_code || 0) !== 0) {
+    throw new Error(`minimax semantic business error: ${String(data?.base_resp?.status_msg || "unknown").slice(0, 200)}`);
+  }
   const output = extractMiniMaxOutputText(data);
   if (!output) throw new Error("minimax semantic provider returned no text output");
   return parseSemanticOutput(output);
