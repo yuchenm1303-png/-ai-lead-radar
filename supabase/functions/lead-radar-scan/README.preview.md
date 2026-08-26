@@ -1,1 +1,0 @@
-This branch adds full public post previews to successful direct scan results for manual source-quality review.
