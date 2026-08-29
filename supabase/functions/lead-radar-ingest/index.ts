@@ -87,6 +87,9 @@ function normalizeItem(input: any) {
     budget: input?.budget ? String(input.budget).trim().slice(0, 100) : null,
     author_id: authorId,
     author_name: authorName,
+    content_kind: String(input?.content_kind || "post").trim().slice(0, 20) || "post",
+    context_text: String(input?.context_text || "").trim().slice(0, 1200),
+    parent_source_id: input?.parent_source_id ? String(input.parent_source_id).trim().slice(0, 160) : null,
   };
 }
 
@@ -107,6 +110,8 @@ async function semanticContentHash(item: any) {
     item.excerpt,
     item.author_id || "",
     item.author_name || "",
+    item.content_kind || "post",
+    item.context_text || "",
   ].join("\n"));
 }
 
@@ -491,6 +496,94 @@ async function recordQueryRun(context: any, items: any[], decisions: any[], coun
   }
 }
 
+
+function actorPlatformSource(value: unknown) {
+  const source = String(value || "unknown").trim().slice(0, 40) || "unknown";
+  return source.startsWith("小红书") ? "小红书" : source;
+}
+
+function actorMemoryKey(item: any) {
+  const authorId = String(item?.author_id || "").trim();
+  return authorId ? `${actorPlatformSource(item?.source)}|${authorId}` : "";
+}
+
+function policyDirection(assessment: PolicyAssessment) {
+  if (assessment.actor_role === "buyer") return "buy";
+  if (assessment.actor_role === "provider") return "sell";
+  if (assessment.actor_role === "recruiter") return "recruit";
+  if (["learner", "content"].includes(assessment.actor_role)) return "non_transactional";
+  return "unknown";
+}
+
+function actorContextFromRow(row: any) {
+  if (!row) return null;
+  return {
+    observations: Math.max(0, Number(row.observations || 0)),
+    buyer_count: Math.max(0, Number(row.buyer_count || 0)),
+    provider_count: Math.max(0, Number(row.provider_count || 0)),
+    recruiter_count: Math.max(0, Number(row.recruiter_count || 0)),
+    learner_count: Math.max(0, Number(row.learner_count || 0)),
+    content_count: Math.max(0, Number(row.content_count || 0)),
+    unknown_count: Math.max(0, Number(row.unknown_count || 0)),
+    buy_count: Math.max(0, Number(row.buy_count || 0)),
+    sell_count: Math.max(0, Number(row.sell_count || 0)),
+    recruit_count: Math.max(0, Number(row.recruit_count || 0)),
+    non_transactional_count: Math.max(0, Number(row.non_transactional_count || 0)),
+    unknown_direction_count: Math.max(0, Number(row.unknown_direction_count || 0)),
+    max_buyer_probability: clampInt(row.max_buyer_probability, 0),
+    last_role: String(row.last_role || "unknown"),
+    last_direction: String(row.last_direction || "unknown"),
+    last_confidence: clampInt(row.last_confidence, 0),
+  };
+}
+
+async function loadActorMemory(items: any[]) {
+  const result = new Map<string, Record<string, unknown>>();
+  const unique = new Map<string, { source: string; authorId: string }>();
+  for (const item of items) {
+    const key = actorMemoryKey(item);
+    if (!key) continue;
+    unique.set(key, { source: actorPlatformSource(item.source), authorId: String(item.author_id) });
+  }
+  await Promise.all([...unique.entries()].map(async ([key, actor]) => {
+    try {
+      const rows = await rest(`lead_radar_actor_memory?source=eq.${encodeURIComponent(actor.source)}&author_id=eq.${encodeURIComponent(actor.authorId)}&select=observations,buyer_count,provider_count,recruiter_count,learner_count,content_count,unknown_count,buy_count,sell_count,recruit_count,non_transactional_count,unknown_direction_count,max_buyer_probability,last_role,last_direction,last_confidence&limit=1`);
+      const context = actorContextFromRow(Array.isArray(rows) ? rows[0] : null);
+      if (context) result.set(key, context);
+    } catch (error) {
+      console.warn("actor memory lookup failed", String(error));
+    }
+  }));
+  return result;
+}
+
+async function recordActorObservation(item: any, assessment: PolicyAssessment, semantic: SemanticAssessment | null) {
+  const authorId = String(item?.author_id || "").trim();
+  if (!authorId) return;
+  const role = semantic?.actor_role || assessment.actor_role || "unknown";
+  const direction = semantic?.transaction_direction || policyDirection(assessment);
+  const buyerProbability = semantic?.buyer_probability ?? (role === "buyer" ? Math.max(55, assessment.intent_score) : 0);
+  const confidence = semantic?.confidence ?? assessment.confidence;
+  try {
+    await rest("rpc/lead_radar_record_actor_observation", {
+      method: "POST",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({
+        p_source: actorPlatformSource(item.source),
+        p_author_id: authorId,
+        p_author_name: item.author_name || null,
+        p_source_id: item.external_id || null,
+        p_actor_role: role,
+        p_direction: direction,
+        p_buyer_probability: clampInt(buyerProbability, 0),
+        p_confidence: clampInt(confidence, 0),
+      }),
+    });
+  } catch (error) {
+    console.warn("actor memory record failed", String(error));
+  }
+}
+
 async function ingest(payload: any) {
   const rawItems = Array.isArray(payload?.items) ? payload.items : [];
   const items = rawItems.map(normalizeItem).filter(Boolean).slice(0, 100);
@@ -519,6 +612,7 @@ async function ingest(payload: any) {
     if (guardrail.action === "reject") {
       filtered += 1;
       await updateSeen(Number(seen.id), "filtered", null, assessment);
+      await recordActorObservation(item, assessment, null);
       decisions.push({
         external_id: item.external_id,
         disposition: "filtered",
@@ -531,6 +625,7 @@ async function ingest(payload: any) {
     pending.push({ item, seen, dedupeKey, assessment, contentHash: await semanticContentHash(item) });
   }
 
+  const actorMemory = await loadActorMemory(pending.map((entry) => entry.item));
   const semanticById = new Map<string, SemanticAssessment>();
   const cachedSemanticIds = new Set<string>();
   if (semanticActive && pending.length) {
@@ -555,6 +650,9 @@ async function ingest(payload: any) {
           title: entry.item.title,
           excerpt: entry.item.excerpt,
           author_name: entry.item.author_name,
+          content_kind: entry.item.content_kind,
+          context_text: entry.item.context_text,
+          actor_context: actorMemory.get(actorMemoryKey(entry.item)) || null,
         })), settings);
         for (const [id, semantic] of classified.entries()) semanticById.set(id, semantic);
       } catch (error) {
@@ -577,6 +675,7 @@ async function ingest(payload: any) {
     if (semantic && !cachedSemanticIds.has(semanticKey)) {
       await persistSemantic(item, entry.contentHash, settings, semantic, semanticDecision || "uncertain");
     }
+    await recordActorObservation(item, assessment, semantic);
 
     let shouldStore = assessment.is_lead;
     let dispositionReason = "policy";

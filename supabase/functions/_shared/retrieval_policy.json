@@ -1,40 +1,112 @@
 {
-  "version": "3.0.0",
+  "version": "4.0.0",
   "freshness_minutes": 1440,
   "topics": {
-    "mini_program": {"category":"微信小程序","prior":1.35,"terms":["小程序","微信小程序"]},
-    "website": {"category":"网页开发","prior":1.20,"terms":["网站","官网"]},
-    "independent_site": {"category":"独立站","prior":1.00,"terms":["独立站","英文官网"]},
-    "management_system": {"category":"网页开发","prior":1.05,"terms":["管理系统","后台系统","业务系统"]},
-    "ai_agent": {"category":"AI / 自动化","prior":1.00,"terms":["AI智能体","智能体","AI应用"]},
-    "automation": {"category":"AI / 自动化","prior":0.95,"terms":["自动化","工作流自动化"]},
-    "python_data": {"category":"Python / 数据","prior":0.90,"terms":["Python脚本","爬虫","数据处理"]}
+    "mini_program": {
+      "category": "微信小程序",
+      "prior": 1.35,
+      "terms": [
+        "小程序",
+        "微信小程序"
+      ]
+    },
+    "website": {
+      "category": "网页开发",
+      "prior": 1.2,
+      "terms": [
+        "网站",
+        "官网"
+      ]
+    },
+    "independent_site": {
+      "category": "独立站",
+      "prior": 1.0,
+      "terms": [
+        "独立站",
+        "英文官网"
+      ]
+    },
+    "management_system": {
+      "category": "网页开发",
+      "prior": 1.05,
+      "terms": [
+        "管理系统",
+        "后台系统",
+        "业务系统"
+      ]
+    },
+    "ai_agent": {
+      "category": "AI / 自动化",
+      "prior": 1.0,
+      "terms": [
+        "AI智能体",
+        "智能体",
+        "AI应用"
+      ]
+    },
+    "automation": {
+      "category": "AI / 自动化",
+      "prior": 0.95,
+      "terms": [
+        "自动化",
+        "工作流自动化"
+      ]
+    },
+    "python_data": {
+      "category": "Python / 数据",
+      "prior": 0.9,
+      "terms": [
+        "Python脚本",
+        "爬虫",
+        "数据处理"
+      ]
+    }
   },
   "archetypes": {
     "vendor_search": {
       "description": "明确寻找外部开发者、团队或技术供应商",
       "prior": 1.35,
-      "templates": ["有项目找{topic}开发", "有没有人能帮我做{topic}", "找人做{topic} 带报价"]
+      "templates": [
+        "有项目找{topic}开发",
+        "有没有人能帮我做{topic}",
+        "找人做{topic} 带报价"
+      ]
     },
     "quote_budget": {
       "description": "已有交付意图并询问预算、报价或成本",
-      "prior": 1.20,
-      "templates": ["做{topic}多少钱 求报价", "{topic}开发预算", "{topic}报价 找人"]
+      "prior": 1.2,
+      "templates": [
+        "做{topic}多少钱 求报价",
+        "{topic}开发预算",
+        "{topic}报价 找人"
+      ]
     },
     "modify_takeover": {
       "description": "已有产品或项目，需要二开、加功能、修改或接手",
       "prior": 1.28,
-      "templates": ["现有{topic}二开", "{topic}加功能 找人", "{topic}项目找人接手"]
+      "templates": [
+        "现有{topic}二开",
+        "{topic}加功能 找人",
+        "{topic}项目找人接手"
+      ]
     },
     "business_need": {
       "description": "从真实业务需求出发，希望把想法做成数字产品",
       "prior": 1.12,
-      "templates": ["公司需要做{topic}", "业务想做{topic}", "想做一个{topic} 找技术"]
+      "templates": [
+        "公司需要做{topic}",
+        "业务想做{topic}",
+        "想做一个{topic} 找技术"
+      ]
     },
     "blocked_project": {
       "description": "项目遇到实现障碍，需要外部技术继续完成",
       "prior": 1.08,
-      "templates": ["{topic}开发卡住了", "{topic}做不出来 找人", "{topic}需要修改"]
+      "templates": [
+        "{topic}开发卡住了",
+        "{topic}做不出来 找人",
+        "{topic}需要修改"
+      ]
     }
   },
   "legacy_archetype_map": {
@@ -60,5 +132,18 @@
     "provider_noise_penalty": 0.22,
     "duplicate_penalty": 0.28
   },
-  "alias_prior_decay": 0.92
+  "alias_prior_decay": 0.92,
+  "source_portfolio": {
+    "manual_conversation_calls": 1,
+    "auto_conversation_calls": 0,
+    "min_manual_provider_budget": 3,
+    "anchor_cooldown_minutes": 360,
+    "anchor_max_age_minutes": 20160,
+    "min_comments": 1,
+    "max_comment_candidates": 20,
+    "preferred_roles": [
+      "provider",
+      "content"
+    ]
+  }
 }

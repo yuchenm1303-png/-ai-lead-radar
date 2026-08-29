@@ -1,6 +1,6 @@
 import type { ActorRole, PolicyAssessment } from "./lead_policy.ts";
 
-export const INTELLIGENCE_VERSION = "3.2.0";
+export const INTELLIGENCE_VERSION = "3.3.0";
 export type SemanticProvider = "openai" | "minimax";
 export const DEFAULT_SEMANTIC_PROVIDER: SemanticProvider = "openai";
 export const DEFAULT_SEMANTIC_MODELS: Record<SemanticProvider, string> = {
@@ -29,6 +29,9 @@ export interface SemanticCandidate {
   title: string;
   excerpt: string;
   author_name?: string | null;
+  content_kind?: string | null;
+  context_text?: string | null;
+  actor_context?: Record<string, unknown> | null;
 }
 
 export interface SemanticAssessment {
@@ -177,6 +180,8 @@ const RESPONSE_SCHEMA = {
 const SYSTEM_INSTRUCTIONS = `You are the buyer-intent classifier for a software-development lead radar.
 Classify the AUTHOR'S actor role and transaction direction from the overall meaning, not by keyword overlap.
 Actor role and transaction direction are separate dimensions.
+For content_kind=comment, classify the COMMENT AUTHOR. context_text describes the parent post and is context only; never inherit the parent author's provider/buyer role.
+actor_context is historical evidence about the same author from earlier observed posts/comments. Treat it as a PRIOR only: repeated provider/sell history is strong evidence against reading vague current text as buyer intent, but explicit current buy/sell intent always overrides history.
 A buyer is an author who wants to commission, outsource, or hire a vendor/freelancer to build or modify software, a website, mini-program, app, automation, AI system, script, data solution, or a closely related custom digital product for the author's own real need. Direction=buy.
 A provider advertises development services, solicits clients, shows cases, gives vendor-marketing advice, or says they can build software for others. Direction=sell.
 Recruitment for employees/interns is recruiter. Direction=recruit.
@@ -197,6 +202,9 @@ function semanticInput(candidates: SemanticCandidate[]) {
     title: item.title.slice(0, 240),
     excerpt: item.excerpt.slice(0, 1600),
     author_name: String(item.author_name || "").slice(0, 120),
+    content_kind: String(item.content_kind || "post").slice(0, 20),
+    context_text: String(item.context_text || "").slice(0, 1200),
+    actor_context: item.actor_context && typeof item.actor_context === "object" ? item.actor_context : null,
   }));
 }
 

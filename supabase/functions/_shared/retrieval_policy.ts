@@ -1,6 +1,6 @@
 import retrievalPolicyData from "./retrieval_policy.json" with { type: "json" };
 
-export type RetrievalLane = "exploit" | "explore" | "expand" | "manual";
+export type RetrievalLane = "exploit" | "explore" | "expand" | "conversation" | "manual";
 
 export interface QuerySpec {
   key: string;
@@ -382,6 +382,21 @@ export function retrievalLimits() {
     max_queries_auto: Math.max(1, Math.floor(numberValue(scheduler.max_queries_auto, 1))),
     max_provider_calls_web: Math.max(1, Math.floor(numberValue(scheduler.max_provider_calls_web, 3))),
     max_provider_calls_auto: Math.max(1, Math.floor(numberValue(scheduler.max_provider_calls_auto, 1))),
+  };
+}
+
+export function sourcePortfolioPolicy() {
+  const source = retrievalPolicy.source_portfolio || {};
+  const preferredRoles = uniqueStrings(source.preferred_roles);
+  return {
+    manual_conversation_calls: Math.max(0, Math.floor(numberValue(source.manual_conversation_calls, 1))),
+    auto_conversation_calls: Math.max(0, Math.floor(numberValue(source.auto_conversation_calls, 0))),
+    min_manual_provider_budget: Math.max(1, Math.floor(numberValue(source.min_manual_provider_budget, 3))),
+    anchor_cooldown_minutes: Math.max(30, Math.floor(numberValue(source.anchor_cooldown_minutes, 360))),
+    anchor_max_age_minutes: Math.max(60, Math.floor(numberValue(source.anchor_max_age_minutes, 20160))),
+    min_comments: Math.max(1, Math.floor(numberValue(source.min_comments, 1))),
+    max_comment_candidates: Math.max(1, Math.min(40, Math.floor(numberValue(source.max_comment_candidates, 20)))),
+    preferred_roles: preferredRoles.length ? preferredRoles : ["provider", "content"],
   };
 }
 
