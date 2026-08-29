@@ -20,7 +20,7 @@ jobs:
       - name: Apply source patch
         run: |
           python scripts/v4_production_patch.py
-          git restore .github/workflows/v4-production-patcher.yml
+          git restore .github/workflows/v4-production-patcher.yml .github/workflows/ci.yml
       - name: Commit generated source changes
         run: |
           git config user.name "github-actions[bot]"
