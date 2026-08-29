@@ -119,7 +119,7 @@ export function assessText(title: string, excerpt = ""): PolicyAssessment {
   reasonCodes.push(...topicHits.map((key: string) => `topic:${key}`));
   reasonCodes.push(...actor.labels.map((label: string) => `exclude:${label}`));
 
-  const actorBuyerConflict = !(["buyer", "unknown"] as ActorRole[]).includes(role) && directBuyer;
+  const actorBuyerConflict = !(["buyer", "unknown"] as ActorRole[]).includes(role) && explicitDirect;
   if (actorBuyerConflict) reasonCodes.push("policy:actor_buyer_conflict");
 
   let confidence = 54 + (role === "buyer" ? 18 : 0) + (directBuyer ? 12 : 0);
