@@ -94,7 +94,7 @@ class RetrievalV4FeasibilityTests(unittest.TestCase):
         self.assertNotIn("网站", query["keyword"][0])
         self.assertNotIn("小程序", query["keyword"][0])
 
-    def test_overlap_metrics_measure_novel_discovery(self):
+    def test_overlap_metrics_measure_novel_discovery_and_persist_manifest(self):
         known_probe, intent_probe, open_probe = build_default_plan(known_keyword="找人做网站")
         executions = [
             ProbeExecution(known_probe, result_for(known_probe, 2), (candidate("a", "A"), candidate("b", "B"))),
@@ -111,10 +111,18 @@ class RetrievalV4FeasibilityTests(unittest.TestCase):
         self.assertEqual(executions[2].result.overlap_with_known, 0)
 
         payload = report(executions, plan=[known_probe, intent_probe, open_probe], executed=True)
+        self.assertEqual(payload["provider_calls_attempted"], 3)
         self.assertEqual(payload["summary"]["total_unique_candidates"], 4)
         self.assertEqual(payload["summary"]["discovery_unique_candidates"], 3)
         self.assertEqual(payload["summary"]["discovery_novel_vs_known"], 2)
         self.assertEqual(payload["summary"]["discovery_overlap_with_known"], 1)
+        self.assertEqual(len(payload["candidate_manifest"]), 4)
+
+        rows = {row["external_id"]: row for row in payload["candidate_manifest"]}
+        self.assertEqual(rows["a"]["found_by"], ["known_intent"])
+        self.assertEqual(rows["b"]["found_by"], ["known_intent", "intent_discovery"])
+        self.assertEqual(rows["c"]["found_by"], ["intent_discovery"])
+        self.assertEqual(rows["d"]["found_by"], ["open_recent"])
 
     def test_dry_report_has_no_results_and_declares_call_ceiling(self):
         plan = build_default_plan(known_keyword="找人做网站")
@@ -122,7 +130,9 @@ class RetrievalV4FeasibilityTests(unittest.TestCase):
 
         self.assertFalse(payload["executed"])
         self.assertEqual(payload["provider_call_ceiling"], 3)
+        self.assertEqual(payload["provider_calls_attempted"], 0)
         self.assertEqual(payload["results"], [])
+        self.assertEqual(payload["candidate_manifest"], [])
 
 
 if __name__ == "__main__":
