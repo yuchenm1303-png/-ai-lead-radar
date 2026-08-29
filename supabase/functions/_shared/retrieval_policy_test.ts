@@ -34,7 +34,7 @@ Deno.test("retrieval v3 is archetype driven and never emits bare-topic broad pro
     "小程序", "微信小程序", "网站", "官网", "独立站", "英文官网", "管理系统", "后台系统", "业务系统",
     "AI智能体", "智能体", "AI应用", "自动化", "工作流自动化", "Python脚本", "爬虫", "数据处理",
   ].map((value) => value.toLowerCase()));
-  assert(RETRIEVAL_VERSION === "4.0.0", `unexpected retrieval version ${RETRIEVAL_VERSION}`);
+  assert(RETRIEVAL_VERSION === "4.1.0", `unexpected retrieval version ${RETRIEVAL_VERSION}`);
   assert(portfolio.length > 100, `portfolio too small: ${portfolio.length}`);
   assert(archetypes.has("vendor_search") && archetypes.has("quote_budget") && archetypes.has("modify_takeover"), `missing archetypes: ${[...archetypes].join(",")}`);
   assert(!portfolio.some((spec) => bareTopics.has(spec.keyword.toLowerCase())), "V3 must not issue bare-topic broad searches");

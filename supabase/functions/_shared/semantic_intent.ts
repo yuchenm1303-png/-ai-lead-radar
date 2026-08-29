@@ -1,6 +1,6 @@
 import type { ActorRole, PolicyAssessment } from "./lead_policy.ts";
 
-export const INTELLIGENCE_VERSION = "3.3.0";
+export const INTELLIGENCE_VERSION = "3.4.0";
 export type SemanticProvider = "openai" | "minimax";
 export const DEFAULT_SEMANTIC_PROVIDER: SemanticProvider = "openai";
 export const DEFAULT_SEMANTIC_MODELS: Record<SemanticProvider, string> = {
@@ -363,6 +363,18 @@ async function classifyMiniMax(
   return parseSemanticOutput(output);
 }
 
+
+export function requireCompleteSemanticCoverage(
+  candidates: SemanticCandidate[],
+  result: Map<string, SemanticAssessment>,
+) {
+  const missing = candidates
+    .map((candidate) => String(candidate.id || "").trim())
+    .filter((id) => id && !result.has(id));
+  if (missing.length) throw new Error(`semantic provider omitted ${missing.length} item(s): ${missing.slice(0, 4).join(",")}`);
+  return result;
+}
+
 export async function classifySemanticBatch(
   candidates: SemanticCandidate[],
   settings: IntelligenceSettings,
@@ -375,6 +387,8 @@ export async function classifySemanticBatch(
   const provider = effectiveProvider(settings);
   const credential = String(apiKey || await resolveSemanticCredential({ ...settings, provider }, fetchImpl) || "").trim();
   if (!credential) return new Map<string, SemanticAssessment>();
-  if (provider === "minimax") return await classifyMiniMax(candidates, { ...settings, provider }, credential, fetchImpl);
-  return await classifyOpenAI(candidates, { ...settings, provider }, credential, fetchImpl);
+  const result = provider === "minimax"
+    ? await classifyMiniMax(candidates, { ...settings, provider }, credential, fetchImpl)
+    : await classifyOpenAI(candidates, { ...settings, provider }, credential, fetchImpl);
+  return requireCompleteSemanticCoverage(candidates, result);
 }

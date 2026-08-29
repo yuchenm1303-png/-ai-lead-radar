@@ -30,6 +30,8 @@ Deno.test("manual three-call scan reserves one conversation call while auto and 
   assert(override.search_calls === 3 && override.conversation_calls === 0, JSON.stringify(override));
   const small = allocateProviderCalls("web", 2, false, policy);
   assert(small.search_calls === 2 && small.conversation_calls === 0, JSON.stringify(small));
+  const noAnchor = allocateProviderCalls("web", 3, false, policy, false);
+  assert(noAnchor.search_calls === 3 && noAnchor.conversation_calls === 0, JSON.stringify(noAnchor));
 });
 
 Deno.test("conversation anchor prefers provider/content posts with comments and respects cooldown", () => {
@@ -142,4 +144,44 @@ Deno.test("comments are grouped by commenter, parent author replies are skipped,
   assert(entry.item.content_kind === "comment", "comment kind missing");
   assert(String(entry.item.context_text).includes("关联帖子标题"), "parent context missing");
   assert(String(entry.item.external_id).endsWith(":c2"), `stable id=${entry.item.external_id}`);
+});
+
+Deno.test("conversation anchor rejects contradictory historical provider snapshots", () => {
+  const now = new Date("2026-08-29T12:00:00Z");
+  const contradictory: any = {
+    id: "old-misclassified-buyer",
+    title: "寻找杭州本地小程序开发的公司或者个人",
+    decision: "filtered",
+    published_at: "2026-08-28T10:00:00Z",
+    metrics: { comments: 50 },
+    assessment: {
+      actor_role: "provider",
+      confidence: 90,
+      buying_stage: "explicit",
+      reason_codes: ["actor:provider", "intent:direct_buyer", "intent:explicit_search_language"],
+      negative_hits: ["服务商自推广"],
+    },
+  };
+  const verifiedProvider: any = {
+    id: "verified-provider",
+    title: "专业承接小程序开发",
+    decision: "filtered",
+    published_at: "2026-08-29T10:00:00Z",
+    metrics: { comments: 3 },
+    assessment: {
+      actor_role: "provider",
+      confidence: 95,
+      buying_stage: "none",
+      reason_codes: ["actor:provider", "exclude:服务商自推广"],
+      negative_hits: ["服务商自推广"],
+    },
+  };
+  const anchor = selectConversationAnchor([contradictory, verifiedProvider], {
+    now,
+    cooldownIds: new Set(),
+    maxAgeMinutes: policy.anchor_max_age_minutes,
+    minComments: 1,
+    preferredRoles: policy.preferred_roles,
+  });
+  assert(anchor?.id === "verified-provider", `unexpected anchor=${anchor?.id}`);
 });

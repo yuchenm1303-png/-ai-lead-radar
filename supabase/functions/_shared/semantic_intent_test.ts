@@ -5,6 +5,7 @@ import {
   classifySemanticBatch,
   decideSemantic,
   hardGuardrail,
+  requireCompleteSemanticCoverage,
   type IntelligenceSettings,
   type SemanticAssessment,
 } from "./semantic_intent.ts";
@@ -148,4 +149,24 @@ Deno.test("semantic request carries comment parent context and actor memory only
   assert(input.items[0].actor_context.observations === 3, "actor memory missing");
   assert(String(request.instructions).includes("COMMENT AUTHOR"), "comment-author instruction missing");
   assert(String(request.instructions).includes("PRIOR only"), "actor-prior instruction missing");
+});
+
+Deno.test("semantic coverage must include every candidate before enforce can trust the batch", () => {
+  const candidates = [
+    { id: "a", title: "甲", excerpt: "需求一" },
+    { id: "b", title: "乙", excerpt: "需求二" },
+  ];
+  const result = new Map<string, SemanticAssessment>([["a", {
+    id: "a",
+    actor_role: "buyer",
+    transaction_direction: "buy",
+    buyer_probability: 95,
+    confidence: 95,
+    project_specificity: 80,
+    reason: "buyer",
+    evidence: ["需求一"],
+  }]]);
+  let threw = false;
+  try { requireCompleteSemanticCoverage(candidates, result); } catch { threw = true; }
+  assert(threw, "partial semantic batch must fail instead of silently falling back to rules");
 });

@@ -333,7 +333,7 @@ async function fetchJustOnePageOnce(spec: QuerySpec, page: number) {
   url.searchParams.set("page", String(Math.max(1, page)));
   url.searchParams.set("sortType", "time_descending");
   url.searchParams.set("noteType", "ALL");
-  url.searchParams.set("timeFilter", "ALL");
+  url.searchParams.set("timeFilter", "ONE_DAY");
   const response = await fetch(url, {
     headers: { Accept: "application/json", "User-Agent": "AI-Lead-Radar/3.1" },
     signal: AbortSignal.timeout(20_000),
@@ -483,26 +483,6 @@ function historicalPosts(rows: any[]) {
     for (const post of Array.isArray(row?.result?.posts) ? row.result.posts : []) posts.push(post);
   }
   return posts;
-}
-
-function mergeAnchorCandidates(historical: any[], current: any[]) {
-  const byId = new Map<string, any>();
-  for (const post of historical) {
-    const id = String(post?.id || "");
-    if (id) byId.set(id, post);
-  }
-  for (const post of current) {
-    const id = String(post?.id || "");
-    if (!id) continue;
-    const previous = byId.get(id) || {};
-    byId.set(id, {
-      ...previous,
-      ...post,
-      semantic: post.semantic || previous.semantic || null,
-      assessment: post.assessment || previous.assessment || null,
-    });
-  }
-  return [...byId.values()];
 }
 
 function conversationSource(spec: QuerySpec, result: Awaited<ReturnType<typeof fetchConversationOnce>>) {
@@ -666,7 +646,17 @@ async function executeClaimedScan(requestRow: any) {
     const perScanBudget = requestedFrom === "auto" ? settings.auto_provider_calls_per_scan : settings.manual_provider_calls_per_scan;
     const providerCallBudget = Math.max(1, Math.min(perScanBudget, remainingHourlyCalls));
     const queryOverride = String(requestRow?.query_override || "").trim();
-    const allocation = allocateProviderCalls(requestedFrom, providerCallBudget, Boolean(queryOverride), SOURCE_POLICY);
+    const recentRowsForConversation = requestedFrom === "auto" || queryOverride ? [] : await latestRequests(50);
+    const preselectedConversationAnchor = selectConversationAnchor(
+      historicalPosts(Array.isArray(recentRowsForConversation) ? recentRowsForConversation : []),
+      {
+        cooldownIds: conversationCooldownIds(Array.isArray(recentRowsForConversation) ? recentRowsForConversation : [], new Date(), SOURCE_POLICY.anchor_cooldown_minutes),
+        maxAgeMinutes: SOURCE_POLICY.anchor_max_age_minutes,
+        minComments: SOURCE_POLICY.min_comments,
+        preferredRoles: SOURCE_POLICY.preferred_roles,
+      },
+    );
+    const allocation = allocateProviderCalls(requestedFrom, providerCallBudget, Boolean(queryOverride), SOURCE_POLICY, Boolean(preselectedConversationAnchor));
     const desiredQueries = Math.max(1, Math.min(3, Number(requestRow?.max_queries || (requestedFrom === "auto" ? settings.auto_queries_per_scan : settings.manual_queries_per_scan))));
     const metrics = await queryMetrics();
     const specs = chooseQueries({
@@ -740,16 +730,7 @@ async function executeClaimedScan(requestRow: any) {
 
 
     if (allocation.conversation_calls > 0) {
-      const recentRows = await latestRequests(50);
-      const currentPosts = [...postMap.values()];
-      const cooldownIds = conversationCooldownIds(Array.isArray(recentRows) ? recentRows : [], new Date(), SOURCE_POLICY.anchor_cooldown_minutes);
-      const candidates = mergeAnchorCandidates(historicalPosts(Array.isArray(recentRows) ? recentRows : []), currentPosts);
-      const anchor = selectConversationAnchor(candidates, {
-        cooldownIds,
-        maxAgeMinutes: SOURCE_POLICY.anchor_max_age_minutes,
-        minComments: SOURCE_POLICY.min_comments,
-        preferredRoles: SOURCE_POLICY.preferred_roles,
-      });
+      const anchor = preselectedConversationAnchor;
       if (!anchor) {
         conversation.reason = "no_eligible_provider_or_content_anchor";
       } else {
