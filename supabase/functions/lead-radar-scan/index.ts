@@ -16,13 +16,23 @@ try {
   const keys = JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS") || "{}");
   SECRET_KEY = keys.default || SECRET_KEY;
 } catch {}
+
 const JUSTONE_TOKEN = (Deno.env.get("JUSTONE_API_TOKEN") || "").trim();
 const JUSTONE_ENDPOINT = (Deno.env.get("JUSTONE_API_ENDPOINT") || "https://api.justoneapi.com/api/xiaohongshu/search-note/v4").trim();
 const MAX_REQUESTS_PER_HOUR = 3;
 const MIN_REQUEST_GAP_MS = 5 * 60 * 1000;
 const MAX_PREVIEW_BODY_CHARS = 12000;
 const MAX_PREVIEW_IMAGES = 9;
+const INGEST_TIMEOUT_MS = 120_000;
+const STALE_RUNNING_MS = 8 * 60 * 1000;
 const LIMITS = retrievalLimits();
+
+type EdgeRuntimeLike = { waitUntil?: (promise: Promise<unknown>) => void };
+
+function edgeRuntime(): EdgeRuntimeLike | null {
+  const runtime = (globalThis as any).EdgeRuntime;
+  return runtime && typeof runtime === "object" ? runtime as EdgeRuntimeLike : null;
+}
 
 function cors(origin = "") {
   return {
@@ -34,7 +44,10 @@ function cors(origin = "") {
 }
 
 function json(data: unknown, status = 200, origin = "") {
-  return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json; charset=utf-8", ...cors(origin) } });
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8", ...cors(origin) },
+  });
 }
 
 function restHeaders(extra: Record<string, string> = {}) {
@@ -249,6 +262,7 @@ function buildPreview(note: any, id: string, title: string, body: string, publis
   const user = note?.user && typeof note.user === "object" ? note.user : {};
   const nickname = firstText(user, ["nickname", "nick_name", "name", "user_name", "userName"]);
   const avatar = safeHttpUrl(firstText(user, ["avatar", "avatar_url", "avatarUrl", "image"]));
+  const authorId = firstText(user, ["id", "user_id", "userId", "userid"]);
   return {
     id,
     source: "小红书",
@@ -256,7 +270,7 @@ function buildPreview(note: any, id: string, title: string, body: string, publis
     body: body.slice(0, MAX_PREVIEW_BODY_CHARS),
     published_at: published.toISOString(),
     url: `https://www.xiaohongshu.com/explore/${id}`,
-    author: nickname || avatar ? { nickname: nickname.slice(0, 100), avatar } : null,
+    author: nickname || avatar || authorId ? { id: authorId.slice(0, 160) || null, nickname: nickname.slice(0, 100), avatar } : null,
     images: collectImageUrls(note?.images_list ?? note?.images ?? note?.image_list).slice(0, MAX_PREVIEW_IMAGES),
     metrics: {
       likes: numericMetric(note?.liked_count ?? note?.likes_count ?? note?.like_count),
@@ -289,12 +303,19 @@ function parseNote(note: any, now = Date.now()) {
       published_at: published.toISOString(),
       url: preview.url,
       budget: null,
+      author_id: preview.author?.id || null,
+      author_name: preview.author?.nickname || null,
     },
     preview,
   };
 }
 
-async function fetchJustOnePage(spec: QuerySpec, page: number) {
+function transientProviderError(error: unknown) {
+  const text = String(error || "");
+  return /HTTP 429|HTTP 5\d\d|business code 301|TimeoutError|timed out|network/i.test(text);
+}
+
+async function fetchJustOnePageOnce(spec: QuerySpec, page: number) {
   if (!JUSTONE_TOKEN) throw new Error("JUSTONE_API_TOKEN is not configured");
   const url = new URL(JUSTONE_ENDPOINT);
   url.searchParams.set("token", JUSTONE_TOKEN);
@@ -304,8 +325,8 @@ async function fetchJustOnePage(spec: QuerySpec, page: number) {
   url.searchParams.set("noteType", "ALL");
   url.searchParams.set("timeFilter", "ALL");
   const response = await fetch(url, {
-    headers: { Accept: "application/json", "User-Agent": "AI-Lead-Radar/3.0" },
-    signal: AbortSignal.timeout(20000),
+    headers: { Accept: "application/json", "User-Agent": "AI-Lead-Radar/3.1" },
+    signal: AbortSignal.timeout(20_000),
   });
   const text = await response.text();
   if (!response.ok) throw new Error(`Just One HTTP ${response.status}: ${text.slice(0, 200)}`);
@@ -330,6 +351,20 @@ async function fetchJustOnePage(spec: QuerySpec, page: number) {
     oldest_published_at: dates.length ? new Date(Math.min(...dates)).toISOString() : null,
     entries: parsed.filter((entry) => entry.fresh),
   };
+}
+
+async function fetchJustOnePage(spec: QuerySpec, page: number) {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await fetchJustOnePageOnce(spec, page);
+    } catch (error) {
+      lastError = error;
+      if (attempt > 0 || !transientProviderError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 650));
+    }
+  }
+  throw lastError;
 }
 
 function newQuerySource(spec: QuerySpec) {
@@ -369,14 +404,12 @@ function mergePage(source: ReturnType<typeof newQuerySource>, page: Awaited<Retu
 async function executeRetrievalPlan(specs: QuerySpec[], providerCallBudget: number) {
   const sources = specs.map(newQuerySource);
   let providerCallsUsed = 0;
-
   for (const source of sources) {
     if (providerCallsUsed >= providerCallBudget) break;
     const page = await fetchJustOnePage(source.spec, 1);
     providerCallsUsed += 1;
     mergePage(source, page);
   }
-
   while (providerCallsUsed < providerCallBudget) {
     const candidates = sources
       .filter((source) => source.pages > 0 && shouldFetchNextPage({
@@ -394,19 +427,13 @@ async function executeRetrievalPlan(specs: QuerySpec[], providerCallBudget: numb
     providerCallsUsed += 1;
     mergePage(source, page);
   }
-
   return { sources: sources.filter((source) => source.pages > 0), providerCallsUsed };
 }
 
 async function ingestItems(items: any[], spec: QuerySpec, source: ReturnType<typeof newQuerySource>, scanRequestId: number) {
   const response = await fetch(`${SB_URL}/functions/v1/lead-radar-ingest/api/v1/ingest`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      apikey: SECRET_KEY,
-      Authorization: `Bearer ${SECRET_KEY}`,
-    },
+    headers: { "Content-Type": "application/json", Accept: "application/json", apikey: SECRET_KEY, Authorization: `Bearer ${SECRET_KEY}` },
     body: JSON.stringify({
       items,
       query_context: {
@@ -428,7 +455,7 @@ async function ingestItems(items: any[], spec: QuerySpec, source: ReturnType<typ
         oldest_published_at: source.oldest_published_at,
       },
     }),
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(INGEST_TIMEOUT_MS),
   });
   const text = await response.text();
   let payload: any = {};
@@ -443,6 +470,16 @@ async function updateRequest(id: number, values: Record<string, unknown>) {
     headers: { Prefer: "return=minimal" },
     body: JSON.stringify({ ...values, updated_at: new Date().toISOString() }),
   });
+}
+
+async function claimDirectRequest(id: number) {
+  const startedAt = new Date().toISOString();
+  const rows = await rest(`lead_radar_scan_requests?id=eq.${id}&status=eq.queued&select=*`, {
+    method: "PATCH",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({ status: "running", started_at: startedAt, updated_at: startedAt, error_text: null }),
+  });
+  return Array.isArray(rows) ? rows[0] || null : null;
 }
 
 async function recordRun(payload: Record<string, unknown>) {
@@ -472,6 +509,8 @@ function decoratePosts(previews: any[], decisions: any[]) {
       lead_id: decision?.lead_id || null,
       score: decision?.score ?? null,
       assessment: decision?.assessment || null,
+      semantic: decision?.semantic || null,
+      semantic_decision: decision?.semantic_decision || null,
     };
   });
 }
@@ -484,12 +523,10 @@ function postRank(post: any) {
   return 1;
 }
 
-async function executeDirectScan(requestRow: any) {
+async function executeClaimedScan(requestRow: any) {
   const id = Number(requestRow?.id || 0);
   if (!Number.isInteger(id) || id <= 0) throw new Error("invalid scan request");
-  const startedAt = new Date().toISOString();
-  await updateRequest(id, { status: "running", started_at: startedAt, error_text: null });
-
+  const startedAt = requestRow.started_at || new Date().toISOString();
   try {
     const settings = await retrievalSettings();
     const callsLastHour = await providerCallsLastHour();
@@ -511,17 +548,12 @@ async function executeDirectScan(requestRow: any) {
     const postMap = new Map<string, any>();
     const leadIds = new Set<number>();
     const queryResults: any[] = [];
-    let totalStored = 0;
-    let totalFiltered = 0;
-    let totalDuplicates = 0;
-    let totalNotified = 0;
-    let totalScanned = 0;
+    let totalStored = 0, totalFiltered = 0, totalDuplicates = 0, totalNotified = 0, totalScanned = 0;
 
     for (const source of retrieval.sources) {
-      const items = [...source.entries.values()].map((entry) => entry.item);
-      const previews = [...source.entries.values()].map((entry) => entry.preview);
-      const ingest = await ingestItems(items, source.spec, source, id);
-      const posts = decoratePosts(previews, ingest.decisions || []);
+      const values = [...source.entries.values()];
+      const ingest = await ingestItems(values.map((entry) => entry.item), source.spec, source, id);
+      const posts = decoratePosts(values.map((entry) => entry.preview), ingest.decisions || []);
       for (const post of posts) {
         const key = String(post.id || "");
         if (!key) continue;
@@ -550,6 +582,8 @@ async function executeDirectScan(requestRow: any) {
         stored: Number(ingest.stored || 0),
         filtered: Number(ingest.filtered || 0),
         duplicates: Number(ingest.duplicates || 0),
+        semantic_calls: Number(ingest.semantic_calls || 0),
+        semantic_cached: Number(ingest.semantic_cached || 0),
         request_ids: source.request_ids,
         newest_published_at: source.newest_published_at,
         oldest_published_at: source.oldest_published_at,
@@ -564,6 +598,7 @@ async function executeDirectScan(requestRow: any) {
       provider: "justone-xiaohongshu-v4",
       policy_version: POLICY_VERSION,
       retrieval_version: RETRIEVAL_VERSION,
+      execution_mode: "background",
       query: queryResults[0] ? {
         key: queryResults[0].key,
         keyword: queryResults[0].keyword,
@@ -598,51 +633,70 @@ async function executeDirectScan(requestRow: any) {
       high_intent: highIntent,
       status: "success",
       error_text: null,
-      details: {
-        mode: "retrieval-v2",
-        retrieval_version: RETRIEVAL_VERSION,
-        policy_version: POLICY_VERSION,
-        provider_calls: result.provider_calls,
-        queries: queryResults,
-      },
+      details: { mode: "retrieval-v2-background", retrieval_version: RETRIEVAL_VERSION, policy_version: POLICY_VERSION, provider_calls: result.provider_calls, queries: queryResults },
     });
-    return { id, status: "success", requested_at: requestRow.requested_at, started_at: startedAt, finished_at: finishedAt, result, error_text: null };
+    return { id, status: "success", started_at: startedAt, finished_at: finishedAt, result, error_text: null };
   } catch (error) {
-    const finishedAt = new Date().toISOString();
     const message = String(error).slice(0, 700);
-    await updateRequest(id, { status: "failed", finished_at: finishedAt, error_text: message, result: { policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION } });
-    await recordRun({
-      connector: "justone-xiaohongshu-v4",
-      started_at: startedAt,
-      finished_at: finishedAt,
-      scanned: 0,
-      stored: 0,
-      filtered: 0,
-      high_intent: 0,
-      status: "failed",
-      error_text: message,
-      details: { policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION },
-    });
+    const finishedAt = new Date().toISOString();
+    await updateRequest(id, { status: "failed", finished_at: finishedAt, result: { policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION, execution_mode: "background" }, error_text: message });
+    await recordRun({ connector: "justone-xiaohongshu-v4", started_at: startedAt, finished_at: finishedAt, scanned: 0, stored: 0, filtered: 0, high_intent: 0, status: "failed", error_text: message, details: { policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION, mode: "retrieval-v2-background" } });
     throw error;
   }
 }
 
+async function executeQueuedRequest(requestRow: any) {
+  const claimed = await claimDirectRequest(Number(requestRow?.id || 0));
+  if (!claimed) return null;
+  return await executeClaimedScan(claimed);
+}
+
+function scheduleBackgroundScan(row: any) {
+  if (!JUSTONE_TOKEN || !row?.id) return false;
+  const runtime = edgeRuntime();
+  if (!runtime?.waitUntil) return false;
+  runtime.waitUntil(executeQueuedRequest(row).catch((error) => {
+    console.error("background scan failed", String(error));
+  }));
+  return true;
+}
+
+async function recoverStaleRunningRequests(rows: any[]) {
+  const now = Date.now();
+  for (const row of rows) {
+    if (String(row?.status || "") !== "running") continue;
+    const started = new Date(row?.started_at || 0).getTime();
+    if (!Number.isFinite(started) || now - started <= STALE_RUNNING_MS) continue;
+    await updateRequest(Number(row.id), {
+      status: "failed",
+      finished_at: new Date().toISOString(),
+      error_text: "Scan worker exceeded recovery timeout",
+      result: { policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION, recovered_stale_worker: true },
+    });
+  }
+}
+
 async function statusPayload() {
-  const requests = await latestRequests(10);
-  const rows = Array.isArray(requests) ? requests : [];
+  let requests = await latestRequests(10);
+  let rows = Array.isArray(requests) ? requests : [];
+  await recoverStaleRunningRequests(rows);
+  requests = await latestRequests(10);
+  rows = Array.isArray(requests) ? requests : [];
   const active = rows.find((row: any) => ["queued", "running"].includes(String(row?.status || ""))) || null;
   const latest = rows[0] || null;
   const latestSuccess = rows.find((row: any) => String(row?.status || "") === "success") || null;
   const window = requestWindow(rows);
   const settings = await retrievalSettings();
   const callsLastHour = await providerCallsLastHour();
+  const backgroundReady = Boolean(JUSTONE_TOKEN && edgeRuntime()?.waitUntil);
   return {
     ok: true,
     platform: "小红书 · Just One V4",
     provider: "justone-xiaohongshu-v4",
     policy_version: POLICY_VERSION,
     retrieval_version: RETRIEVAL_VERSION,
-    direct_ready: Boolean(JUSTONE_TOKEN),
+    direct_ready: backgroundReady,
+    execution_mode: "queued-background",
     running: String(active?.status || "") === "running",
     queued: String(active?.status || "") === "queued",
     active_request: publicRequest(active),
@@ -667,12 +721,7 @@ async function createScanRequest(settings: Awaited<ReturnType<typeof retrievalSe
   const rows = await rest("lead_radar_scan_requests?select=*", {
     method: "POST",
     headers: { Prefer: "return=representation" },
-    body: JSON.stringify({
-      requested_from: "web",
-      max_queries: settings.manual_queries_per_scan,
-      provider: "justone-xiaohongshu-v4",
-      status: "queued",
-    }),
+    body: JSON.stringify({ requested_from: "web", max_queries: settings.manual_queries_per_scan, provider: "justone-xiaohongshu-v4", status: "queued" }),
   });
   return rows?.[0] || null;
 }
@@ -690,22 +739,21 @@ Deno.serve(async (request) => {
   if (request.method === "POST" && url.pathname.endsWith("/api/v1/request")) {
     if (!ALLOWED.has(origin)) return json({ detail: "Origin not allowed" }, 403, origin);
     try {
-      const requests = await latestRequests(10);
-      const rows = Array.isArray(requests) ? requests : [];
+      let requests = await latestRequests(10);
+      let rows = Array.isArray(requests) ? requests : [];
+      await recoverStaleRunningRequests(rows);
+      requests = await latestRequests(10);
+      rows = Array.isArray(requests) ? requests : [];
       const active = rows.find((row: any) => ["queued", "running"].includes(String(row?.status || ""))) || null;
       if (active) {
-        if (String(active.status) === "queued" && JUSTONE_TOKEN) {
-          const completed = await executeDirectScan(active);
-          return json({ ok: true, direct: true, existing: true, request: publicRequest(completed) }, 200, origin);
-        }
-        return json({ ok: true, direct: false, existing: true, request: publicRequest(active) }, 200, origin);
+        const backgroundStarted = String(active.status) === "queued" ? scheduleBackgroundScan(active) : false;
+        return json({ ok: true, direct: backgroundStarted, background: true, existing: true, request: publicRequest(active) }, 202, origin);
       }
 
       const window = requestWindow(rows);
       if (window.recentCount >= MAX_REQUESTS_PER_HOUR || window.cooldownSeconds > 0) {
         return json({ detail: "Scan rate limit active", retry_after_seconds: Math.max(1, window.cooldownSeconds), next_available_at: window.nextAvailableAt }, 429, origin);
       }
-
       const settings = await retrievalSettings();
       const callsLastHour = await providerCallsLastHour();
       if (callsLastHour >= settings.provider_calls_per_hour_cap) {
@@ -713,9 +761,8 @@ Deno.serve(async (request) => {
       }
       const created = await createScanRequest(settings);
       if (!created?.id) throw new Error("failed to create scan request");
-      if (!JUSTONE_TOKEN) return json({ ok: true, direct: false, existing: false, request: publicRequest(created) }, 202, origin);
-      const completed = await executeDirectScan(created);
-      return json({ ok: true, direct: true, existing: false, request: publicRequest(completed) }, 200, origin);
+      const backgroundStarted = scheduleBackgroundScan(created);
+      return json({ ok: true, direct: backgroundStarted, background: true, existing: false, request: publicRequest(created) }, 202, origin);
     } catch (error) {
       return json({ detail: String(error).slice(0, 500), policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION }, 500, origin);
     }
