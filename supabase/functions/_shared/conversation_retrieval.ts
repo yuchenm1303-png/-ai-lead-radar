@@ -25,7 +25,13 @@ export interface ConversationAnchor {
   images?: string[];
   metrics?: { comments?: number | null; likes?: number | null; collects?: number | null; shares?: number | null } | null;
   decision?: string | null;
-  assessment?: { actor_role?: string | null; confidence?: number | null } | null;
+  assessment?: {
+    actor_role?: string | null;
+    confidence?: number | null;
+    buying_stage?: string | null;
+    reason_codes?: string[] | null;
+    negative_hits?: string[] | null;
+  } | null;
   semantic?: {
     actor_role?: string | null;
     transaction_direction?: string | null;
@@ -50,12 +56,15 @@ export function allocateProviderCalls(
   providerCallBudget: number,
   hasManualOverride: boolean,
   policy: SourcePortfolioPolicy,
+  conversationAvailable = true,
 ): ProviderCallAllocation {
   const budget = Math.max(0, Math.floor(Number(providerCallBudget) || 0));
   if (!budget) return { search_calls: 0, conversation_calls: 0 };
   if (hasManualOverride) return { search_calls: budget, conversation_calls: 0 };
 
-  const requested = requestedFrom === "auto"
+  const requested = !conversationAvailable
+    ? 0
+    : requestedFrom === "auto"
     ? clampInt(policy.auto_conversation_calls, 0, 0, budget)
     : budget >= clampInt(policy.min_manual_provider_budget, 3, 1, 100)
     ? clampInt(policy.manual_conversation_calls, 1, 0, budget)
@@ -74,6 +83,32 @@ function directionOf(post: ConversationAnchor) {
 
 function confidenceOf(post: ConversationAnchor) {
   return Math.max(Number(post.semantic?.confidence || 0), Number(post.assessment?.confidence || 0));
+}
+
+
+function assessmentReasonCodes(post: ConversationAnchor) {
+  return new Set((Array.isArray(post.assessment?.reason_codes) ? post.assessment?.reason_codes : []).map((value) => String(value)));
+}
+
+function verifiedConversationAnchor(post: ConversationAnchor, roles: Set<string>) {
+  const semanticRole = String(post.semantic?.actor_role || "").toLowerCase();
+  if (post.semantic) {
+    if (!roles.has(semanticRole) || Number(post.semantic.confidence || 0) < 75) return false;
+    const direction = directionOf(post);
+    if (semanticRole === "provider") return direction === "sell";
+    if (semanticRole === "content") return direction === "non_transactional" || direction === "unknown";
+    return false;
+  }
+
+  const policyRole = String(post.assessment?.actor_role || "").toLowerCase();
+  if (!roles.has(policyRole)) return false;
+  if (String(post.decision || "") !== "filtered") return false;
+  if (Number(post.assessment?.confidence || 0) < 88) return false;
+  const reasons = assessmentReasonCodes(post);
+  const contradictoryBuyer = reasons.has("actor:buyer") || reasons.has("intent:direct_buyer") || reasons.has("intent:explicit_search_language");
+  if (contradictoryBuyer || String(post.assessment?.buying_stage || "") === "explicit") return false;
+  if (!reasons.has(`actor:${policyRole}`)) return false;
+  return true;
 }
 
 function publishedAgeMinutes(post: ConversationAnchor, now: Date) {
@@ -114,9 +149,7 @@ export function selectConversationAnchor(
     if (comments < Math.max(1, options.minComments)) return false;
     const age = publishedAgeMinutes(post, now);
     if (!Number.isFinite(age) || age < -5 || age > Math.max(1, options.maxAgeMinutes)) return false;
-    const role = roleOf(post);
-    if (!roles.has(role)) return false;
-    if (role === "provider" && post.semantic && directionOf(post) !== "sell") return false;
+    if (!verifiedConversationAnchor(post, roles)) return false;
     return true;
   });
 

@@ -675,14 +675,29 @@ async function ingest(payload: any) {
     if (semantic && !cachedSemanticIds.has(semanticKey)) {
       await persistSemantic(item, entry.contentHash, settings, semantic, semanticDecision || "uncertain");
     }
-    await recordActorObservation(item, assessment, semantic);
+    if (semantic) await recordActorObservation(item, assessment, semantic);
+
+    if (settings.enabled && settings.mode === "enforce" && !semantic) {
+      filtered += 1;
+      await updateSeen(Number(seen.id), "error", null, assessment, null, null);
+      decisions.push({
+        external_id: item.external_id,
+        disposition: "filtered",
+        lead_id: null,
+        assessment,
+        semantic: null,
+        semantic_decision: null,
+        intelligence: { route: semanticActive ? "semantic_missing_retryable" : "semantic_unavailable_retryable" },
+      });
+      continue;
+    }
 
     let shouldStore = assessment.is_lead;
     let dispositionReason = "policy";
-    if (settings.enabled && settings.mode === "enforce" && semantic) {
+    if (settings.enabled && settings.mode === "enforce") {
       shouldStore = semanticDecision === "accept";
-      dispositionReason = `semantic:${semanticDecision}`;
-      if (semanticDecision === "accept") assessment = mergeAcceptedSemantic(assessment, semantic);
+      dispositionReason = `semantic:${semanticDecision || "missing"}`;
+      if (semanticDecision === "accept" && semantic) assessment = mergeAcceptedSemantic(assessment, semantic);
     } else if (settings.enabled && settings.mode === "shadow" && semantic) {
       dispositionReason = `semantic_shadow:${semanticDecision}`;
     } else if (settings.enabled && !semanticActive) {
