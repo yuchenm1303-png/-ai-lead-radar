@@ -11,6 +11,9 @@ on:
         options:
           - final-verdict
           - free-smoke
+  push:
+    branches:
+      - benchmark/retrieval-v4-once
 
 permissions:
   contents: read
@@ -34,15 +37,25 @@ jobs:
             exit 2
           fi
 
+      - name: Retrieval V4 controlled feasibility benchmark (3 requests max)
+        if: ${{ github.event_name == 'push' }}
+        working-directory: backend
+        run: |
+          python -m benchmarks.retrieval_v4_feasibility \
+            --execute \
+            --hours 24 \
+            --max-provider-calls 3 \
+            --output-dir benchmarks/output
+
       - name: FINAL V4 freshness verdict (1 request only)
-        if: ${{ inputs.mode == 'final-verdict' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'final-verdict' }}
         run: |
           python backend/benchmarks/justone_smoke.py \
             --keyword "小程序" \
             --output-dir backend/benchmarks/output
 
       - name: Free cached cross-platform smoke test (1 request)
-        if: ${{ inputs.mode == 'free-smoke' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'free-smoke' }}
         run: |
           python backend/benchmarks/justone_cross_search_smoke.py \
             --keyword "找人做小程序" \
