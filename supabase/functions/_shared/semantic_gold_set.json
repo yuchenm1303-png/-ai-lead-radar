@@ -1,0 +1,26 @@
+[
+  {"id":"buyer-paid-school-website","title":"学校比赛需要做个网站，有偿","excerpt":"预算可以聊，想尽快上线","label":"lead","actor_role":"buyer","transaction_direction":"buy"},
+  {"id":"buyer-ai-agent-team","title":"寻找AI智能体开发团队或个人，要求产品做成网页端登录使用","excerpt":"围绕社交媒体寻找潜在客户并推送，其他细节进一步沟通","label":"lead","actor_role":"buyer","transaction_direction":"buy"},
+  {"id":"buyer-mini-program-commerce","title":"急！需要icp+edi，小程序，知识付费，在线交易","excerpt":"其他细节可以沟通","label":"lead","actor_role":"buyer","transaction_direction":"buy"},
+  {"id":"buyer-course-website","title":"找人开发在线课程网站","excerpt":"需要后台、登录和内容管理，预算可聊","label":"lead","actor_role":"buyer","transaction_direction":"buy"},
+  {"id":"buyer-paid-wechat","title":"有没有人会做微信小程序，有偿","excerpt":"预约系统，比较急","label":"lead","actor_role":"buyer","transaction_direction":"buy"},
+  {"id":"buyer-company-official-site","title":"公司找开发做官网","excerpt":"有偿，尽快，需要中英文页面","label":"lead","actor_role":"buyer","transaction_direction":"buy"},
+  {"id":"buyer-system-secondary-dev","title":"现有管理系统想二开，有人能做吗","excerpt":"需要改权限和报表功能，价格可聊","label":"lead","actor_role":"buyer","transaction_direction":"buy"},
+  {"id":"buyer-automation-workflow","title":"想做一个自动化工作流","excerpt":"有没有会做的，预算面议","label":"lead","actor_role":"buyer","transaction_direction":"buy"},
+  {"id":"buyer-hangzhou-mini-program","title":"寻找杭州本地小程序开发的公司或者个人","excerpt":"【诚找杭州本地小程序开发服务商】因公司数字化升级需求，长期寻找杭州深耕小程序定制开发的正规技术公司。","label":"lead","actor_role":"buyer","transaction_direction":"buy"},
+
+  {"id":"provider-mini-program-custom","title":"小程序接定制开发","excerpt":"小程序开发 小程序商城 小程序制作 小程序设计 软件开发","label":"not_lead","actor_role":"provider","transaction_direction":"sell"},
+  {"id":"provider-software-company","title":"企业级高端软件定制开发，就找极客上线！","excerpt":"我们是一家以产品思维主导的精品软件定制公司，每年深度交付定制项目。","label":"not_lead","actor_role":"provider","transaction_direction":"sell"},
+  {"id":"provider-one-stop","title":"定制化APP开发 小程序开发 网站开发","excerpt":"专业开发app小程序网站，一站式服务，源码交付包售后，需要的可以说一下你的需求。","label":"not_lead","actor_role":"provider","transaction_direction":"sell"},
+  {"id":"provider-pay-later","title":"小程序开发，网页制作可先做后付","excerpt":"小程序开发，网页制作可先做后付，前端后端开发，网页设计代做，网站建设。","label":"not_lead","actor_role":"provider","transaction_direction":"sell"},
+  {"id":"recruiter-web-intern","title":"海大有同学找实习吗？网站开发实习生","excerpt":"公司在学校旁边，主要工作是网站开发","label":"not_lead","actor_role":"recruiter","transaction_direction":"recruit"},
+  {"id":"content-avoid-pit","title":"小程序定制避坑指南（三）这三个坑省好几万","excerpt":"不少老板做小程序踩坑，盲目选低价模板，看着便宜但功能固定不能改。","label":"not_lead","actor_role":"content","transaction_direction":"non_transactional"},
+  {"id":"content-vendor-ranking","title":"2026年广州小程序定制开发公司排名","excerpt":"很多广州商家关心小程序定制开发哪家便宜，下面结合服务商情况进行整理。","label":"not_lead","actor_role":"content","transaction_direction":"non_transactional"},
+  {"id":"learner-tutorial","title":"教你用 Workbuddy 开发一款微信小程序","excerpt":"从0到1开发一款小程序，零基础实战，小白也能快速上手。","label":"not_lead","actor_role":"learner","transaction_direction":"non_transactional"},
+  {"id":"noise-school-site-help","title":"关西学院大学院出愿求助！！！","excerpt":"学校网站填写出愿信息时要求写高校代码，不知道这个页面怎么填写。","label":"not_lead","actor_role":"unknown","transaction_direction":"non_transactional"},
+  {"id":"noise-website-import-help","title":"sos","excerpt":"用的是小红书上一个老师的网站，导入图片后只显示closed的图片，而且好卡。","label":"not_lead","actor_role":"unknown","transaction_direction":"non_transactional"},
+  {"id":"noise-web-game","title":"【网页游戏】求助！家里好像进了其他人……","excerpt":"内容仅供娱乐，游戏作者ID，游戏实况，恐怖，心理测试。","label":"not_lead","actor_role":"content","transaction_direction":"non_transactional"},
+  {"id":"noise-milk-site","title":"求助milk网站相关","excerpt":"我按了那个输入框但底下出不来键盘是怎么回事呀。","label":"not_lead","actor_role":"unknown","transaction_direction":"non_transactional"},
+  {"id":"noise-wormbase","title":"wormbase求助","excerpt":"点开wormbase网站出现异常页面，更换浏览器和网络仍然无法解决，已经给官方反馈。","label":"not_lead","actor_role":"unknown","transaction_direction":"non_transactional"},
+  {"id":"content-repair-sites","title":"老师傅私藏4个维修宝藏网站","excerpt":"维修界百科全书，数码家电拆机图文教程详细，小白也能跟着操作。","label":"not_lead","actor_role":"content","transaction_direction":"non_transactional"}
+]
