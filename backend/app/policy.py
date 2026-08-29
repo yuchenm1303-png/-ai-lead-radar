@@ -141,7 +141,7 @@ def assess_text(title: str, excerpt: str = "") -> PolicyAssessment:
     evidence.extend(intent_hits[:4])
     evidence.extend(topic_hits[:3])
 
-    actor_buyer_conflict = actor_role not in {ActorRole.BUYER, ActorRole.UNKNOWN} and direct_buyer
+    actor_buyer_conflict = actor_role not in {ActorRole.BUYER, ActorRole.UNKNOWN} and explicit_direct
     if actor_buyer_conflict:
         reason_codes.append("policy:actor_buyer_conflict")
 
