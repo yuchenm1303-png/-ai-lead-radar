@@ -1,0 +1,35 @@
+name: V4 Quality Recall Patcher
+
+on:
+  push:
+    branches: [fix/retrieval-v4-quality-recall]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[v4-quality-patched]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/retrieval-v4-quality-recall
+          fetch-depth: 0
+      - name: Apply source patch
+        run: python scripts/v4_quality_recall_patch.py
+      - name: Commit source changes only
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/tests/test_retrieval_v3.py \
+            supabase/functions/_shared/retrieval_policy.json \
+            supabase/functions/_shared/retrieval_policy_test.ts \
+            supabase/functions/_shared/conversation_retrieval.ts \
+            supabase/functions/_shared/conversation_retrieval_test.ts \
+            supabase/functions/_shared/semantic_intent.ts \
+            supabase/functions/_shared/semantic_intent_test.ts \
+            supabase/functions/lead-radar-ingest/index.ts \
+            supabase/functions/lead-radar-scan/index.ts
+          git commit -m "fix(retrieval): tighten V4 quality and fresh recall [v4-quality-patched]"
+          git push origin HEAD:fix/retrieval-v4-quality-recall
