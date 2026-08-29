@@ -235,6 +235,31 @@ def apply_overlap_metrics(executions: list[ProbeExecution]) -> None:
         execution.result.overlap_with_known = len(own & known) if execution.probe.key != "known_intent" else len(known)
 
 
+def candidate_manifest(executions: list[ProbeExecution]) -> list[dict[str, Any]]:
+    """Persist the normalized candidate pool so later semantic evaluation needs no re-fetch."""
+
+    manifest: dict[str, dict[str, Any]] = {}
+    for execution in executions:
+        for candidate in execution.candidates:
+            key = _candidate_key(candidate)
+            row = manifest.get(key)
+            if row is None:
+                row = {
+                    "candidate_key": key,
+                    "external_id": candidate.external_id,
+                    "title": candidate.title,
+                    "excerpt": candidate.excerpt[:1200],
+                    "published_at": candidate.published_at.isoformat(),
+                    "url": candidate.url,
+                    "found_by": [],
+                }
+                manifest[key] = row
+            if execution.probe.key not in row["found_by"]:
+                row["found_by"].append(execution.probe.key)
+
+    return sorted(manifest.values(), key=lambda row: row["published_at"], reverse=True)
+
+
 def report(executions: list[ProbeExecution], *, plan: list[Probe], executed: bool) -> dict[str, Any]:
     if executed:
         apply_overlap_metrics(executions)
@@ -249,6 +274,7 @@ def report(executions: list[ProbeExecution], *, plan: list[Probe], executed: boo
         "retrieval_version": retrieval_version(),
         "executed": executed,
         "provider_call_ceiling": len(plan),
+        "provider_calls_attempted": len(executions) if executed else 0,
         "plan": [asdict(probe) for probe in plan],
         "results": [asdict(execution.result) for execution in executions],
         "summary": {
@@ -257,6 +283,7 @@ def report(executions: list[ProbeExecution], *, plan: list[Probe], executed: boo
             "discovery_novel_vs_known": len(discovery_union - known_keys),
             "discovery_overlap_with_known": len(discovery_union & known_keys),
         },
+        "candidate_manifest": candidate_manifest(executions) if executed else [],
     }
 
 
