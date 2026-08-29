@@ -131,3 +131,21 @@ Deno.test("MiniMax provider parses chatcompletion JSON without exposing the cred
   assert(authorization === "Bearer test-secret", "MiniMax must use Bearer authorization");
   assert(result.get("buyer-1")?.buyer_probability === 96, "MiniMax response should normalize into semantic assessment");
 });
+
+Deno.test("semantic request carries comment parent context and actor memory only as explicit context", () => {
+  const request = buildSemanticRequest([{
+    id: "comment-1",
+    title: "评论需求 · 做一个宠物店小程序大概要多少",
+    excerpt: "目前只有一个想法，没有什么思路\n做一个宠物店小程序，大概要多少？",
+    author_name: "Luv.",
+    content_kind: "comment",
+    context_text: "关联帖子标题：小程序开发服务",
+    actor_context: { observations: 3, provider_count: 0, buyer_count: 1, last_role: "buyer" },
+  }], "gpt-5.4-nano") as any;
+  const input = JSON.parse(request.input);
+  assert(input.items[0].content_kind === "comment", "content kind missing");
+  assert(input.items[0].context_text.includes("关联帖子标题"), "parent context missing");
+  assert(input.items[0].actor_context.observations === 3, "actor memory missing");
+  assert(String(request.instructions).includes("COMMENT AUTHOR"), "comment-author instruction missing");
+  assert(String(request.instructions).includes("PRIOR only"), "actor-prior instruction missing");
+});

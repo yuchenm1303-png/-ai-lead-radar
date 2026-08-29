@@ -45,7 +45,7 @@ class RetrievalV3Tests(unittest.TestCase):
             "小程序", "微信小程序", "网站", "官网", "独立站", "英文官网", "管理系统", "后台系统", "业务系统",
             "ai智能体", "智能体", "ai应用", "自动化", "工作流自动化", "python脚本", "爬虫", "数据处理",
         }
-        self.assertEqual(retrieval_version(), "3.0.0")
+        self.assertEqual(retrieval_version(), "4.0.0")
         self.assertGreater(len(QUERY_SPECS), 100)
         self.assertTrue({"vendor_search", "quote_budget", "modify_takeover"}.issubset(archetypes))
         self.assertFalse(any(spec.keyword.lower() in bare_topics for spec in QUERY_SPECS))

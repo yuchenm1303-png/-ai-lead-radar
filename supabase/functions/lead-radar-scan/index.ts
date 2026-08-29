@@ -3,10 +3,18 @@ import {
   chooseQueries,
   retrievalLimits,
   shouldFetchNextPage,
+  sourcePortfolioPolicy,
   RETRIEVAL_VERSION,
   type QueryMetric,
   type QuerySpec,
 } from "../_shared/retrieval_policy.ts";
+import {
+  allocateProviderCalls,
+  conversationCooldownIds,
+  groupConversationComments,
+  selectConversationAnchor,
+  type ConversationAnchor,
+} from "../_shared/conversation_retrieval.ts";
 
 const ALLOWED = new Set(["https://smirel.com", "http://localhost:3000"]);
 const SB_URL = Deno.env.get("SUPABASE_URL") || "";
@@ -19,6 +27,7 @@ try {
 
 const JUSTONE_TOKEN = (Deno.env.get("JUSTONE_API_TOKEN") || "").trim();
 const JUSTONE_ENDPOINT = (Deno.env.get("JUSTONE_API_ENDPOINT") || "https://api.justoneapi.com/api/xiaohongshu/search-note/v4").trim();
+const JUSTONE_COMMENTS_ENDPOINT = "https://api.justoneapi.com/api/xiaohongshu/get-note-comment/v2";
 const MAX_REQUESTS_PER_HOUR = 3;
 const MIN_REQUEST_GAP_MS = 5 * 60 * 1000;
 const MAX_PREVIEW_BODY_CHARS = 12000;
@@ -26,6 +35,7 @@ const MAX_PREVIEW_IMAGES = 9;
 const INGEST_TIMEOUT_MS = 120_000;
 const STALE_RUNNING_MS = 8 * 60 * 1000;
 const LIMITS = retrievalLimits();
+const SOURCE_POLICY = sourcePortfolioPolicy();
 
 type EdgeRuntimeLike = { waitUntil?: (promise: Promise<unknown>) => void };
 
@@ -430,6 +440,126 @@ async function executeRetrievalPlan(specs: QuerySpec[], providerCallBudget: numb
   return { sources: sources.filter((source) => source.pages > 0), providerCallsUsed };
 }
 
+
+async function fetchConversationOnce(anchor: ConversationAnchor) {
+  if (!JUSTONE_TOKEN) throw new Error("JUSTONE_API_TOKEN is not configured");
+  const url = new URL(JUSTONE_COMMENTS_ENDPOINT);
+  url.searchParams.set("token", JUSTONE_TOKEN);
+  url.searchParams.set("noteId", String(anchor.id));
+  url.searchParams.set("sort", "latest");
+  const response = await fetch(url, {
+    headers: { Accept: "application/json", "User-Agent": "AI-Lead-Radar/4.0" },
+    signal: AbortSignal.timeout(20_000),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`Just One comments HTTP ${response.status}: ${text.slice(0, 200)}`);
+  let payload: any;
+  try { payload = JSON.parse(text); } catch { throw new Error("Just One comments returned invalid JSON"); }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Just One comments returned a non-object response");
+  if (payload.code !== 0) throw new Error(`Just One comments business code ${String(payload.code)}: ${String(payload.message || payload.msg || "business error").slice(0, 180)}`);
+  const grouped = groupConversationComments(payload, anchor, {
+    freshnessMinutes: LIMITS.freshness_minutes,
+    maxCandidates: SOURCE_POLICY.max_comment_candidates,
+  });
+  return { ...grouped, request_id: payload.requestId ? String(payload.requestId).slice(0, 160) : null };
+}
+
+function conversationSpec(anchor: ConversationAnchor): QuerySpec {
+  return {
+    key: `v4:conversation:${String(anchor.id).slice(0, 100)}`,
+    keyword: `评论区 · ${String(anchor.title || anchor.id).slice(0, 180)}`,
+    category: "评论需求",
+    intent_family: "conversation_intent",
+    topic_family: "observed_provider_thread",
+    lane: "conversation",
+    prior: 1,
+  };
+}
+
+function historicalPosts(rows: any[]) {
+  const posts: any[] = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (String(row?.status || "") !== "success") continue;
+    for (const post of Array.isArray(row?.result?.posts) ? row.result.posts : []) posts.push(post);
+  }
+  return posts;
+}
+
+function mergeAnchorCandidates(historical: any[], current: any[]) {
+  const byId = new Map<string, any>();
+  for (const post of historical) {
+    const id = String(post?.id || "");
+    if (id) byId.set(id, post);
+  }
+  for (const post of current) {
+    const id = String(post?.id || "");
+    if (!id) continue;
+    const previous = byId.get(id) || {};
+    byId.set(id, {
+      ...previous,
+      ...post,
+      semantic: post.semantic || previous.semantic || null,
+      assessment: post.assessment || previous.assessment || null,
+    });
+  }
+  return [...byId.values()];
+}
+
+function conversationSource(spec: QuerySpec, result: Awaited<ReturnType<typeof fetchConversationOnce>>) {
+  const source = newQuerySource(spec);
+  source.pages = 1;
+  source.api_calls = 1;
+  source.raw_count = result.raw_count;
+  source.normalized_count = result.normalized_count;
+  source.last_page_raw_count = result.raw_count;
+  source.has_more = false;
+  if (result.request_id) source.request_ids.push(result.request_id);
+  const dates: string[] = [];
+  for (const entry of result.entries) {
+    source.entries.set(entry.id, { item: entry.item, preview: entry.preview });
+    const published = String(entry.item.published_at || "");
+    if (published) dates.push(published);
+  }
+  if (dates.length) {
+    dates.sort();
+    source.oldest_published_at = dates[0];
+    source.newest_published_at = dates[dates.length - 1];
+    source.last_page_oldest_published_at = source.oldest_published_at;
+  }
+  return source;
+}
+
+async function recordFailedProviderCall(spec: QuerySpec, scanRequestId: number, startedAt: string) {
+  try {
+    await rest("lead_radar_query_runs", {
+      method: "POST",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({
+        scan_request_id: scanRequestId,
+        provider: "justone-xiaohongshu-comments-v2",
+        retrieval_version: RETRIEVAL_VERSION,
+        query_key: spec.key,
+        query_text: spec.keyword,
+        lane: spec.lane,
+        intent_family: spec.intent_family,
+        topic_family: spec.topic_family,
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        pages: 1,
+        api_calls: 1,
+        returned_count: 0,
+        normalized_count: 0,
+        fresh_count: 0,
+        qualified_count: 0,
+        filtered_count: 0,
+        duplicate_count: 0,
+      }),
+    });
+  } catch (error) {
+    console.warn("failed provider call accounting failed", String(error));
+  }
+}
+
 async function ingestItems(items: any[], spec: QuerySpec, source: ReturnType<typeof newQuerySource>, scanRequestId: number) {
   const response = await fetch(`${SB_URL}/functions/v1/lead-radar-ingest/api/v1/ingest`, {
     method: "POST",
@@ -438,7 +568,7 @@ async function ingestItems(items: any[], spec: QuerySpec, source: ReturnType<typ
       items,
       query_context: {
         scan_request_id: scanRequestId,
-        provider: "justone-xiaohongshu-v4",
+        provider: spec.lane === "conversation" ? "justone-xiaohongshu-comments-v2" : "justone-xiaohongshu-v4",
         retrieval_version: RETRIEVAL_VERSION,
         query_key: spec.key,
         query_text: spec.keyword,
@@ -535,20 +665,37 @@ async function executeClaimedScan(requestRow: any) {
     const requestedFrom = String(requestRow?.requested_from || "web");
     const perScanBudget = requestedFrom === "auto" ? settings.auto_provider_calls_per_scan : settings.manual_provider_calls_per_scan;
     const providerCallBudget = Math.max(1, Math.min(perScanBudget, remainingHourlyCalls));
+    const queryOverride = String(requestRow?.query_override || "").trim();
+    const allocation = allocateProviderCalls(requestedFrom, providerCallBudget, Boolean(queryOverride), SOURCE_POLICY);
     const desiredQueries = Math.max(1, Math.min(3, Number(requestRow?.max_queries || (requestedFrom === "auto" ? settings.auto_queries_per_scan : settings.manual_queries_per_scan))));
     const metrics = await queryMetrics();
     const specs = chooseQueries({
-      override: String(requestRow?.query_override || "").trim() || null,
+      override: queryOverride || null,
       metrics,
-      count: Math.min(desiredQueries, providerCallBudget),
+      count: Math.min(desiredQueries, allocation.search_calls),
     });
-    if (!specs.length) throw new Error("retrieval plan is empty");
+    if (allocation.search_calls > 0 && !specs.length) throw new Error("retrieval plan is empty");
 
-    const retrieval = await executeRetrievalPlan(specs, providerCallBudget);
+    const retrieval = await executeRetrievalPlan(specs, allocation.search_calls);
     const postMap = new Map<string, any>();
     const leadIds = new Set<number>();
     const queryResults: any[] = [];
     let totalStored = 0, totalFiltered = 0, totalDuplicates = 0, totalNotified = 0, totalScanned = 0;
+    let conversationCallsUsed = 0;
+    let conversation: any = {
+      enabled: allocation.conversation_calls > 0,
+      attempted: false,
+      attempted_at: null,
+      anchor_id: null,
+      anchor_title: null,
+      raw_comments: 0,
+      candidates: 0,
+      stored: 0,
+      filtered: 0,
+      duplicates: 0,
+      error: null,
+      reason: allocation.conversation_calls > 0 ? "awaiting_anchor" : (requestedFrom === "auto" ? "auto_search_only" : queryOverride ? "manual_override_search_only" : "budget_not_reserved"),
+    };
 
     for (const source of retrieval.sources) {
       const values = [...source.entries.values()];
@@ -590,6 +737,89 @@ async function executeClaimedScan(requestRow: any) {
       });
     }
 
+
+
+    if (allocation.conversation_calls > 0) {
+      const recentRows = await latestRequests(50);
+      const currentPosts = [...postMap.values()];
+      const cooldownIds = conversationCooldownIds(Array.isArray(recentRows) ? recentRows : [], new Date(), SOURCE_POLICY.anchor_cooldown_minutes);
+      const candidates = mergeAnchorCandidates(historicalPosts(Array.isArray(recentRows) ? recentRows : []), currentPosts);
+      const anchor = selectConversationAnchor(candidates, {
+        cooldownIds,
+        maxAgeMinutes: SOURCE_POLICY.anchor_max_age_minutes,
+        minComments: SOURCE_POLICY.min_comments,
+        preferredRoles: SOURCE_POLICY.preferred_roles,
+      });
+      if (!anchor) {
+        conversation.reason = "no_eligible_provider_or_content_anchor";
+      } else {
+        const spec = conversationSpec(anchor);
+        const attemptedAt = new Date().toISOString();
+        conversation = {
+          ...conversation,
+          attempted: true,
+          attempted_at: attemptedAt,
+          anchor_id: anchor.id,
+          anchor_title: anchor.title || null,
+          reason: "provider_or_content_comment_mining",
+        };
+        conversationCallsUsed = 1;
+        try {
+          const commentResult = await fetchConversationOnce(anchor);
+          const source = conversationSource(spec, commentResult);
+          const values = [...source.entries.values()];
+          const ingest = await ingestItems(values.map((entry) => entry.item), spec, source, id);
+          const commentPosts = decoratePosts(values.map((entry) => entry.preview), ingest.decisions || []);
+          for (const post of commentPosts) {
+            const key = String(post.id || "");
+            if (!key) continue;
+            const previous = postMap.get(key);
+            if (!previous || postRank(post) > postRank(previous)) postMap.set(key, post);
+          }
+          for (const leadId of Array.isArray(ingest.lead_ids) ? ingest.lead_ids : []) {
+            if (Number.isInteger(Number(leadId)) && Number(leadId) > 0) leadIds.add(Number(leadId));
+          }
+          totalStored += Number(ingest.stored || 0);
+          totalFiltered += Number(ingest.filtered || 0);
+          totalDuplicates += Number(ingest.duplicates || 0);
+          totalNotified += Number(ingest.notified || 0);
+          totalScanned += source.raw_count;
+          queryResults.push({
+            key: spec.key,
+            keyword: spec.keyword,
+            lane: spec.lane,
+            intent_family: spec.intent_family,
+            topic_family: spec.topic_family,
+            pages: source.pages,
+            api_calls: source.api_calls,
+            raw_count: source.raw_count,
+            normalized_count: source.normalized_count,
+            fresh_count: source.entries.size,
+            stored: Number(ingest.stored || 0),
+            filtered: Number(ingest.filtered || 0),
+            duplicates: Number(ingest.duplicates || 0),
+            semantic_calls: Number(ingest.semantic_calls || 0),
+            semantic_cached: Number(ingest.semantic_cached || 0),
+            request_ids: source.request_ids,
+            newest_published_at: source.newest_published_at,
+            oldest_published_at: source.oldest_published_at,
+          });
+          conversation = {
+            ...conversation,
+            raw_comments: source.raw_count,
+            candidates: source.entries.size,
+            stored: Number(ingest.stored || 0),
+            filtered: Number(ingest.filtered || 0),
+            duplicates: Number(ingest.duplicates || 0),
+          };
+        } catch (error) {
+          await recordFailedProviderCall(spec, id, attemptedAt);
+          conversation.error = String(error).slice(0, 300);
+          conversation.reason = "conversation_provider_error";
+        }
+      }
+    }
+
     const posts = [...postMap.values()].sort((a, b) => new Date(b.published_at || 0).getTime() - new Date(a.published_at || 0).getTime());
     const storedVisible = posts.filter((post) => post.decision === "stored").length;
     const filteredVisible = posts.filter((post) => post.decision === "filtered").length;
@@ -607,8 +837,10 @@ async function executeClaimedScan(requestRow: any) {
         topic_family: queryResults[0].topic_family,
       } : null,
       queries: queryResults,
-      provider_calls: retrieval.providerCallsUsed,
+      provider_calls: retrieval.providerCallsUsed + conversationCallsUsed,
       provider_call_budget: providerCallBudget,
+      provider_call_allocation: allocation,
+      conversation,
       scanned: totalScanned,
       fresh: posts.length,
       stored: storedVisible,
@@ -633,14 +865,14 @@ async function executeClaimedScan(requestRow: any) {
       high_intent: highIntent,
       status: "success",
       error_text: null,
-      details: { mode: "retrieval-v2-background", retrieval_version: RETRIEVAL_VERSION, policy_version: POLICY_VERSION, provider_calls: result.provider_calls, queries: queryResults },
+      details: { mode: "retrieval-v4-background", retrieval_version: RETRIEVAL_VERSION, policy_version: POLICY_VERSION, provider_calls: result.provider_calls, queries: queryResults },
     });
     return { id, status: "success", started_at: startedAt, finished_at: finishedAt, result, error_text: null };
   } catch (error) {
     const message = String(error).slice(0, 700);
     const finishedAt = new Date().toISOString();
     await updateRequest(id, { status: "failed", finished_at: finishedAt, result: { policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION, execution_mode: "background" }, error_text: message });
-    await recordRun({ connector: "justone-xiaohongshu-v4", started_at: startedAt, finished_at: finishedAt, scanned: 0, stored: 0, filtered: 0, high_intent: 0, status: "failed", error_text: message, details: { policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION, mode: "retrieval-v2-background" } });
+    await recordRun({ connector: "justone-xiaohongshu-v4", started_at: startedAt, finished_at: finishedAt, scanned: 0, stored: 0, filtered: 0, high_intent: 0, status: "failed", error_text: message, details: { policy_version: POLICY_VERSION, retrieval_version: RETRIEVAL_VERSION, mode: "retrieval-v4-background" } });
     throw error;
   }
 }
