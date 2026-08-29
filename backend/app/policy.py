@@ -141,10 +141,14 @@ def assess_text(title: str, excerpt: str = "") -> PolicyAssessment:
     evidence.extend(intent_hits[:4])
     evidence.extend(topic_hits[:3])
 
+    actor_buyer_conflict = actor_role not in {ActorRole.BUYER, ActorRole.UNKNOWN} and explicit_direct
+    if actor_buyer_conflict:
+        reason_codes.append("policy:actor_buyer_conflict")
+
     confidence = 54 + (18 if actor_role == ActorRole.BUYER else 0) + (12 if direct_buyer else 0)
     confidence += min(12, len(intent_hits) * 4) + min(9, len(topic_hits) * 3)
     if actor_role not in {ActorRole.BUYER, ActorRole.UNKNOWN}:
-        confidence = max(confidence, 90)
+        confidence = min(confidence, 84) if actor_buyer_conflict else max(confidence, 90)
 
     return PolicyAssessment(
         policy_version=str(policy.get("version") or "unknown"),

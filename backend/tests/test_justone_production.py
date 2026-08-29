@@ -36,17 +36,21 @@ class JustOneProductionTests(unittest.TestCase):
         assert raw is not None
         self.assertEqual(int(raw.published_at.timestamp()), 1787653171)
 
-    def test_query_engine_returns_unique_weighted_anchors(self):
+    def test_query_engine_returns_unique_portfolio_probes_with_dynamic_plan_roles(self):
         now = datetime(2026, 8, 25, 10, 0, tzinfo=timezone.utc)
         chosen = choose_queries(now=now, count=4)
+        portfolio_by_key = {item.key: item for item in QUERY_SPECS}
         self.assertEqual(len(chosen), 4)
         self.assertEqual(len({item.key for item in chosen}), 4)
-        self.assertTrue(all(item in QUERY_SPECS for item in chosen))
+        self.assertTrue(all(item.key in portfolio_by_key for item in chosen))
+        self.assertTrue(all(item.keyword == portfolio_by_key[item.key].keyword for item in chosen))
+        self.assertTrue({"exploit", "explore", "expand"}.issubset({item.lane for item in chosen}))
 
     def test_query_override_uses_one_exact_query(self):
         chosen = choose_queries(override="找人做网站", count=3)
         self.assertEqual(len(chosen), 1)
         self.assertEqual(chosen[0].keyword, "找人做网站")
+        self.assertEqual(chosen[0].lane, "manual")
 
     def test_freshness_filter_rejects_old_and_far_future_posts(self):
         now = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)

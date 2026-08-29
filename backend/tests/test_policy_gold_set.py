@@ -52,16 +52,17 @@ class PolicyGoldSetTests(unittest.TestCase):
         self.assertEqual(assessment.actor_role, ActorRole.BUYER)
         self.assertGreaterEqual(assessment.intent_score, 85)
 
-    def test_retrieval_portfolio_contains_precision_discovery_and_aliases(self):
-        lanes = {spec.lane for spec in QUERY_SPECS}
+    def test_retrieval_portfolio_is_separate_intent_driven_candidate_acquisition(self):
+        archetypes = {spec.intent_family for spec in QUERY_SPECS}
         keywords = {spec.keyword.lower() for spec in QUERY_SPECS}
-        self.assertGreater(len(QUERY_SPECS), 50)
-        self.assertTrue({"precision", "discovery", "broad"}.issubset(lanes))
+        bare_topics = {"网站", "官网", "小程序", "微信小程序", "python脚本", "爬虫", "自动化"}
+        self.assertGreater(len(QUERY_SPECS), 100)
+        self.assertTrue({"vendor_search", "quote_budget", "modify_takeover", "business_need"}.issubset(archetypes))
         self.assertTrue(any("微信小程序" in keyword for keyword in keywords))
         self.assertTrue(any("官网" in keyword for keyword in keywords))
-        self.assertTrue(any("脚本" in keyword for keyword in keywords))
-        self.assertIn("网站", keywords)
-        self.assertIn("小程序", keywords)
+        self.assertTrue(any("爬虫" in keyword or "python脚本" in keyword for keyword in keywords))
+        self.assertFalse(any(keyword in bare_topics for keyword in keywords))
+        self.assertTrue(all(spec.key.startswith("v3:") for spec in QUERY_SPECS))
 
 
 if __name__ == "__main__":

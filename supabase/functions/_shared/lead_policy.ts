@@ -119,9 +119,14 @@ export function assessText(title: string, excerpt = ""): PolicyAssessment {
   reasonCodes.push(...topicHits.map((key: string) => `topic:${key}`));
   reasonCodes.push(...actor.labels.map((label: string) => `exclude:${label}`));
 
+  const actorBuyerConflict = !(["buyer", "unknown"] as ActorRole[]).includes(role) && explicitDirect;
+  if (actorBuyerConflict) reasonCodes.push("policy:actor_buyer_conflict");
+
   let confidence = 54 + (role === "buyer" ? 18 : 0) + (directBuyer ? 12 : 0);
   confidence += Math.min(12, intentHits.length * 4) + Math.min(9, topicHits.length * 3);
-  if (!(["buyer", "unknown"] as ActorRole[]).includes(role)) confidence = Math.max(confidence, 90);
+  if (!(["buyer", "unknown"] as ActorRole[]).includes(role)) {
+    confidence = actorBuyerConflict ? Math.min(confidence, 84) : Math.max(confidence, 90);
+  }
 
   return {
     policy_version: String(policy.version || "unknown"),

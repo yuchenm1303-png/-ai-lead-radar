@@ -1,7 +1,6 @@
-import leadPolicyData from "./lead_policy.json" with { type: "json" };
 import retrievalPolicyData from "./retrieval_policy.json" with { type: "json" };
 
-export type RetrievalLane = "precision" | "discovery" | "broad" | "manual";
+export type RetrievalLane = "exploit" | "explore" | "expand" | "manual";
 
 export interface QuerySpec {
   key: string;
@@ -26,7 +25,8 @@ export interface QueryMetric {
   last_run_at: string | null;
 }
 
-const leadPolicy = leadPolicyData as any;
+type PairKey = { archetype: string; topic: string };
+
 const retrievalPolicy = retrievalPolicyData as any;
 
 function numberValue(value: unknown, fallback = 0) {
@@ -49,170 +49,247 @@ function defaultMetric(): QueryMetric {
   };
 }
 
-function laneWeight(lane: RetrievalLane) {
-  if (lane === "manual") return 1;
-  return numberValue(retrievalPolicy.scheduler?.lane_mix?.[lane], lane === "precision" ? 0.62 : lane === "discovery" ? 0.30 : 0.08);
+function cloneMetric(metric: QueryMetric): QueryMetric {
+  return { ...metric };
 }
 
-function lanePrior(lane: RetrievalLane) {
-  if (lane === "manual") return 1;
-  return numberValue(retrievalPolicy.lanes?.[lane]?.prior, 1);
+function addMetric(target: QueryMetric, source: QueryMetric, weight = 1) {
+  target.runs += source.runs * weight;
+  target.api_calls += source.api_calls * weight;
+  target.returned_count += source.returned_count * weight;
+  target.fresh_count += source.fresh_count * weight;
+  target.qualified_count += source.qualified_count * weight;
+  target.filtered_count += source.filtered_count * weight;
+  target.duplicate_count += source.duplicate_count * weight;
+  target.human_positive_count += source.human_positive_count * weight;
+  target.human_negative_count += source.human_negative_count * weight;
+  return target;
 }
 
-function queryTerms(topic: any): string[] {
-  const topicKey = String(topic?.key || "").trim();
-  const configured = retrievalPolicy.topic_terms?.[topicKey];
-  const source = Array.isArray(configured) ? configured : (topic?.query_terms || []);
+function topicConfigEntries() {
+  return Object.entries(retrievalPolicy.topics || {}) as [string, any][];
+}
+
+function archetypeConfigEntries() {
+  return Object.entries(retrievalPolicy.archetypes || {}) as [string, any][];
+}
+
+function uniqueStrings(value: unknown): string[] {
   const result: string[] = [];
-  for (const raw of source) {
-    const value = String(raw || "").trim();
-    if (value && !result.includes(value)) result.push(value);
+  for (const raw of Array.isArray(value) ? value : []) {
+    const text = String(raw || "").trim();
+    if (text && !result.includes(text)) result.push(text);
   }
   return result;
 }
 
 export function buildRetrievalPortfolio(): QuerySpec[] {
   const result: QuerySpec[] = [];
-  const seen = new Set<string>();
-  const aliasDecay = Math.max(0.1, Math.min(1, numberValue(retrievalPolicy.alias_prior_decay, 0.9)));
+  const seenKeywords = new Set<string>();
+  const aliasDecay = Math.max(0.1, Math.min(1, numberValue(retrievalPolicy.alias_prior_decay, 0.92)));
 
-  for (const topic of leadPolicy.topics || []) {
-    const topicKey = String(topic?.key || "").trim();
-    const category = String(topic?.category || "其他开发");
-    const topicPrior = numberValue(topic?.prior, 1);
-    const terms = queryTerms(topic);
-    if (!topicKey || !terms.length) continue;
+  for (const [archetypeKey, archetype] of archetypeConfigEntries()) {
+    const templates = uniqueStrings(archetype?.templates);
+    const archetypePrior = Math.max(0.05, numberValue(archetype?.prior, 1));
+    if (!archetypeKey || !templates.length) continue;
 
-    for (const family of leadPolicy.intent_families || []) {
-      const familyKey = String(family?.key || "").trim();
-      const familyPrior = numberValue(family?.prior, 1);
-      const configuredTemplates = retrievalPolicy.precision_templates?.[familyKey];
-      const templates = (Array.isArray(configuredTemplates) ? configuredTemplates : (family?.query_templates || []))
-        .map(String).map((item: string) => item.trim()).filter(Boolean);
-      if (!familyKey || !templates.length) continue;
+    for (const [topicKey, topic] of topicConfigEntries()) {
+      const terms = uniqueStrings(topic?.terms);
+      const category = String(topic?.category || "其他开发");
+      const topicPrior = Math.max(0.05, numberValue(topic?.prior, 1));
+      if (!topicKey || !terms.length) continue;
+
       terms.forEach((term, termIndex) => {
-        templates.forEach((template: string, templateIndex: number) => {
-          const keyword = template.replaceAll("{topic}", term).trim();
-          const signature = `precision|${keyword.toLowerCase()}`;
-          if (!keyword || seen.has(signature)) return;
-          seen.add(signature);
-          const key = termIndex === 0
-            ? `${familyKey}:${topicKey}:${templateIndex}`
-            : `${familyKey}:${topicKey}:${templateIndex}:alias${termIndex}`;
+        templates.forEach((template, templateIndex) => {
+          const keyword = template.replaceAll("{topic}", term).replace(/\s+/g, " ").trim();
+          const signature = keyword.toLowerCase();
+          if (!keyword || seenKeywords.has(signature)) return;
+          seenKeywords.add(signature);
           result.push({
-            key,
+            key: `v3:${archetypeKey}:${topicKey}:${templateIndex}:${termIndex}`,
             keyword,
             category,
-            intent_family: familyKey,
+            intent_family: archetypeKey,
             topic_family: topicKey,
-            lane: "precision",
-            prior: familyPrior * topicPrior * lanePrior("precision") * Math.pow(aliasDecay, termIndex),
+            lane: "explore",
+            prior: archetypePrior * topicPrior * Math.pow(aliasDecay, termIndex),
           });
         });
       });
     }
-
-    const discoveryTemplates = (retrievalPolicy.lanes?.discovery?.templates || []).map(String).filter(Boolean);
-    terms.forEach((term, termIndex) => {
-      discoveryTemplates.forEach((template: string, templateIndex: number) => {
-        const keyword = template.replaceAll("{topic}", term).trim();
-        const signature = `discovery|${keyword.toLowerCase()}`;
-        if (!keyword || seen.has(signature)) return;
-        seen.add(signature);
-        result.push({
-          key: `discovery:${topicKey}:${templateIndex}:${termIndex}`,
-          keyword,
-          category,
-          intent_family: "discovery",
-          topic_family: topicKey,
-          lane: "discovery",
-          prior: topicPrior * lanePrior("discovery") * Math.pow(aliasDecay, termIndex),
-        });
-      });
-    });
-
-    const broadTemplates = (retrievalPolicy.lanes?.broad?.templates || ["{topic}"]).map(String).filter(Boolean);
-    terms.forEach((term, termIndex) => {
-      broadTemplates.forEach((template: string, templateIndex: number) => {
-        const keyword = template.replaceAll("{topic}", term).trim();
-        const signature = `broad|${keyword.toLowerCase()}`;
-        if (!keyword || seen.has(signature)) return;
-        seen.add(signature);
-        result.push({
-          key: `broad:${topicKey}:${templateIndex}:${termIndex}`,
-          keyword,
-          category,
-          intent_family: "discovery",
-          topic_family: topicKey,
-          lane: "broad",
-          prior: topicPrior * lanePrior("broad") * Math.pow(aliasDecay, termIndex),
-        });
-      });
-    });
   }
 
   return result;
 }
 
-export function queryScore(spec: QuerySpec, metricInput: QueryMetric | undefined, totalRuns: number, now = new Date()) {
-  const metric = metricInput || defaultMetric();
-  const runs = Math.max(0, numberValue(metric.runs));
-  const apiCalls = Math.max(runs, numberValue(metric.api_calls, runs));
+function pairFromKey(key: string): PairKey | null {
+  const parts = String(key || "").split(":");
+  if (parts[0] === "v3" && parts[1] && parts[2]) {
+    return { archetype: parts[1], topic: parts[2] };
+  }
+  const mapped = String(retrievalPolicy.legacy_archetype_map?.[parts[0]] || "");
+  if (mapped && parts[1]) return { archetype: mapped, topic: parts[1] };
+  return null;
+}
+
+function relatedMetric(spec: QuerySpec, metrics: Record<string, QueryMetric>) {
+  const related = defaultMetric();
+  for (const [key, metric] of Object.entries(metrics)) {
+    if (key === spec.key) continue;
+    const pair = pairFromKey(key);
+    if (pair?.archetype === spec.intent_family && pair.topic === spec.topic_family) addMetric(related, metric);
+  }
+  return related;
+}
+
+function effectiveMetric(spec: QuerySpec, metrics: Record<string, QueryMetric>) {
+  const exact = cloneMetric(metrics[spec.key] || defaultMetric());
+  const groupWeight = Math.max(0, Math.min(1, numberValue(retrievalPolicy.scheduler?.group_history_weight, 0.35)));
+  return addMetric(exact, relatedMetric(spec, metrics), groupWeight);
+}
+
+function metricSignals(metric: QueryMetric) {
+  const apiCalls = Math.max(0, numberValue(metric.api_calls, metric.runs));
   const fresh = Math.max(0, numberValue(metric.fresh_count));
   const duplicates = Math.max(0, numberValue(metric.duplicate_count));
   const newUnique = Math.max(0, fresh - duplicates);
   const qualified = Math.max(0, numberValue(metric.qualified_count));
+  const filtered = Math.max(0, numberValue(metric.filtered_count));
   const humanPositive = Math.max(0, numberValue(metric.human_positive_count));
   const humanNegative = Math.max(0, numberValue(metric.human_negative_count));
 
-  const precision = (qualified + 0.5) / (newUnique + 2.0);
-  const uniqueRate = (newUnique + 1.0) / (fresh + 2.0);
-  const duplicateRate = (duplicates + 0.25) / (fresh + 1.0);
+  const buyerEvidence = qualified + humanPositive * 1.75;
+  const precision = (buyerEvidence + 0.75) / (newUnique + humanPositive + humanNegative + 3.0);
+  const buyerYieldPerCall = (buyerEvidence + 0.5) / (apiCalls + 1.5);
   const humanPrecision = (humanPositive + 1.0) / (humanPositive + humanNegative + 2.0);
-  const yieldPerCall = (qualified + 0.5) / (apiCalls + 1.5);
-  const yieldSignal = Math.tanh(yieldPerCall / 2.5);
-  const exploration = numberValue(retrievalPolicy.scheduler?.exploration, 0.42) * Math.sqrt(Math.log(Math.max(0, totalRuns) + 2.0) / (runs + 1.0));
+  const freshPerCall = fresh / Math.max(1, apiCalls);
+  const freshnessSignal = Math.tanh(freshPerCall / 10.0);
+  const duplicateRate = (duplicates + 0.25) / (fresh + 1.0);
+  const noiseRate = (filtered + humanNegative) / (fresh + humanPositive + humanNegative + 2.0);
+  const providerNoisePenalty = Math.max(0, numberValue(retrievalPolicy.scheduler?.provider_noise_penalty, 0.22));
+  const duplicatePenalty = Math.max(0, numberValue(retrievalPolicy.scheduler?.duplicate_penalty, 0.28));
+  const quality =
+    0.36 * precision +
+    0.24 * Math.tanh(buyerYieldPerCall / 1.5) +
+    0.18 * humanPrecision +
+    0.22 * freshnessSignal -
+    providerNoisePenalty * Math.min(1, noiseRate) -
+    duplicatePenalty * Math.min(1, duplicateRate);
 
-  const cooldownMinutes = Math.max(1, numberValue(retrievalPolicy.scheduler?.query_cooldown_minutes, 120));
-  const saturationCooldown = Math.max(cooldownMinutes, numberValue(retrievalPolicy.scheduler?.saturation_cooldown_minutes, 360));
-  const saturationThreshold = Math.max(0, Math.min(1, numberValue(retrievalPolicy.scheduler?.duplicate_saturation_threshold, 0.65)));
-  let minutesSinceLast = Number.POSITIVE_INFINITY;
-  if (metric.last_run_at) {
-    const last = new Date(metric.last_run_at).getTime();
-    if (Number.isFinite(last)) minutesSinceLast = Math.max(0, (now.getTime() - last) / 60000);
-  }
-
-  let cooldownFactor = 1;
-  if (minutesSinceLast < cooldownMinutes) {
-    cooldownFactor = 0.06 + 0.24 * (minutesSinceLast / cooldownMinutes);
-  } else if (Number.isFinite(minutesSinceLast)) {
-    cooldownFactor = 1 + Math.min(0.22, (minutesSinceLast - cooldownMinutes) / Math.max(cooldownMinutes * 8, 1));
-  }
-
-  let saturationFactor = 1;
-  if (duplicateRate >= saturationThreshold && minutesSinceLast < saturationCooldown) {
-    saturationFactor = 0.16;
-  } else {
-    saturationFactor = Math.max(0.35, 1 - Math.min(0.65, duplicateRate * 0.72));
-  }
-
-  const quality = 0.30 * precision + 0.23 * uniqueRate + 0.17 * humanPrecision + 0.15 * yieldSignal + 0.15 * exploration;
-  return spec.prior * (0.38 + quality) * (0.65 + laneWeight(spec.lane)) * cooldownFactor * saturationFactor;
+  return {
+    apiCalls,
+    fresh,
+    duplicates,
+    newUnique,
+    qualified,
+    filtered,
+    humanPositive,
+    humanNegative,
+    buyerEvidence,
+    precision,
+    buyerYieldPerCall,
+    humanPrecision,
+    freshnessSignal,
+    duplicateRate,
+    noiseRate,
+    quality,
+  };
 }
 
-function preferredLane(now: Date): RetrievalLane {
-  const interval = Math.max(1, numberValue(retrievalPolicy.scheduler?.interval_minutes, 15));
-  const bucket = Math.floor(now.getTime() / (interval * 60000));
-  const mix = retrievalPolicy.scheduler?.lane_mix || {};
-  const cycle: RetrievalLane[] = [];
-  const add = (lane: RetrievalLane, weight: unknown) => {
-    const count = Math.max(1, Math.round(numberValue(weight, 0.1) * 10));
-    for (let i = 0; i < count; i += 1) cycle.push(lane);
-  };
-  add("precision", mix.precision ?? 0.62);
-  add("discovery", mix.discovery ?? 0.30);
-  add("broad", mix.broad ?? 0.08);
-  return cycle[bucket % cycle.length] || "precision";
+function minutesSince(value: string | null, now: Date) {
+  if (!value) return Number.POSITIVE_INFINITY;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? Math.max(0, (now.getTime() - timestamp) / 60000) : Number.POSITIVE_INFINITY;
+}
+
+function cooldownFactor(metric: QueryMetric, now: Date) {
+  const cooldown = Math.max(1, numberValue(retrievalPolicy.scheduler?.query_cooldown_minutes, 120));
+  const elapsed = minutesSince(metric.last_run_at, now);
+  if (!Number.isFinite(elapsed)) return 1;
+  if (elapsed < cooldown) return 0.05 + 0.25 * (elapsed / cooldown);
+  return 1 + Math.min(0.18, (elapsed - cooldown) / Math.max(cooldown * 10, 1));
+}
+
+function saturationFactor(metric: QueryMetric, now: Date) {
+  const signals = metricSignals(metric);
+  const threshold = Math.max(0, Math.min(1, numberValue(retrievalPolicy.scheduler?.duplicate_saturation_threshold, 0.65)));
+  const cooldown = Math.max(1, numberValue(retrievalPolicy.scheduler?.saturation_cooldown_minutes, 360));
+  if (signals.duplicateRate >= threshold && minutesSince(metric.last_run_at, now) < cooldown) return 0.14;
+  return Math.max(0.34, 1 - Math.min(0.66, signals.duplicateRate * 0.72));
+}
+
+export function queryScore(spec: QuerySpec, metricInput: QueryMetric | undefined, totalRuns: number, now = new Date()) {
+  const metric = metricInput || defaultMetric();
+  const signals = metricSignals(metric);
+  const exploration = Math.max(0, numberValue(retrievalPolicy.scheduler?.exploration, 0.55)) *
+    Math.sqrt(Math.log(Math.max(0, totalRuns) + 2.0) / (Math.max(0, metric.runs) + 1.0));
+  return spec.prior * (0.72 + signals.quality + 0.12 * exploration) * cooldownFactor(metric, now) * saturationFactor(metric, now);
+}
+
+function exploitScore(spec: QuerySpec, metrics: Record<string, QueryMetric>, totalRuns: number, now: Date) {
+  const exact = metrics[spec.key] || defaultMetric();
+  const effective = effectiveMetric(spec, metrics);
+  const signals = metricSignals(effective);
+  const exploration = Math.max(0, numberValue(retrievalPolicy.scheduler?.exploration, 0.55)) *
+    Math.sqrt(Math.log(Math.max(0, totalRuns) + 2.0) / (Math.max(0, exact.runs) + 1.0));
+  return spec.prior * (0.82 + signals.quality + 0.08 * exploration) * cooldownFactor(exact, now) * saturationFactor(exact, now);
+}
+
+function exploreScore(spec: QuerySpec, metrics: Record<string, QueryMetric>, totalRuns: number, now: Date) {
+  const exact = metrics[spec.key] || defaultMetric();
+  const effective = effectiveMetric(spec, metrics);
+  const quality = Math.max(-0.4, metricSignals(effective).quality);
+  const uncertainty = Math.sqrt(Math.log(Math.max(0, totalRuns) + 3.0) / (Math.max(0, exact.runs) + 1.0));
+  const exploration = Math.max(0.05, numberValue(retrievalPolicy.scheduler?.exploration, 0.55));
+  return spec.prior * (0.68 + exploration * uncertainty + 0.18 * Math.max(0, quality)) * cooldownFactor(exact, now);
+}
+
+function aggregatePairMetric(pair: PairKey, metrics: Record<string, QueryMetric>) {
+  const aggregate = defaultMetric();
+  for (const [key, metric] of Object.entries(metrics)) {
+    const meta = pairFromKey(key);
+    if (meta?.archetype === pair.archetype && meta.topic === pair.topic) addMetric(aggregate, metric);
+  }
+  return aggregate;
+}
+
+function winningPair(portfolio: QuerySpec[], metrics: Record<string, QueryMetric>): PairKey | null {
+  const seen = new Set<string>();
+  let best: { pair: PairKey; score: number } | null = null;
+  for (const spec of portfolio) {
+    const signature = `${spec.intent_family}|${spec.topic_family}`;
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    const pair = { archetype: spec.intent_family, topic: spec.topic_family };
+    const metric = aggregatePairMetric(pair, metrics);
+    const signals = metricSignals(metric);
+    if (signals.qualified + signals.humanPositive <= 0) continue;
+    const score = signals.quality + 0.08 * Math.log1p(signals.qualified + 2 * signals.humanPositive);
+    if (!best || score > best.score) best = { pair, score };
+  }
+  return best?.pair || null;
+}
+
+function expansionScore(spec: QuerySpec, winner: PairKey | null, metrics: Record<string, QueryMetric>, totalRuns: number, now: Date) {
+  if (!winner) return exploreScore(spec, metrics, totalRuns, now);
+  const exact = metrics[spec.key] || defaultMetric();
+  const sameArchetype = spec.intent_family === winner.archetype;
+  const sameTopic = spec.topic_family === winner.topic;
+  let adjacency = 0.20;
+  if (sameArchetype && sameTopic) adjacency = 0.62;
+  else if (sameArchetype) adjacency = 1.00;
+  else if (sameTopic) adjacency = 0.88;
+  const novelty = 1 / Math.sqrt(Math.max(0, exact.runs) + 1.0);
+  const quality = Math.max(0, metricSignals(effectiveMetric(spec, metrics)).quality);
+  return spec.prior * (0.55 + adjacency + 0.48 * novelty + 0.12 * quality) * cooldownFactor(exact, now);
+}
+
+function chooseCandidate(
+  ranked: QuerySpec[],
+  usedKeys: Set<string>,
+  predicate: (spec: QuerySpec) => boolean,
+) {
+  return ranked.find((spec) => !usedKeys.has(spec.key) && predicate(spec)) || null;
 }
 
 export function chooseQueries(options: {
@@ -232,34 +309,43 @@ export function chooseQueries(options: {
   if (!portfolio.length) return [];
   const metrics = options.metrics || {};
   const now = options.now || new Date();
-  const totalRuns = Object.values(metrics).reduce((sum, item) => sum + Math.max(0, numberValue(item?.runs)), 0);
-  const ranked = [...portfolio].sort((a, b) => queryScore(b, metrics[b.key], totalRuns, now) - queryScore(a, metrics[a.key], totalRuns, now));
-  const selected: QuerySpec[] = [];
-  const usedTopics = new Set<string>();
+  const totalRuns = Object.values(metrics).reduce((sum, metric) => sum + Math.max(0, numberValue(metric?.runs)), 0);
   const usedKeys = new Set<string>();
+  const selected: QuerySpec[] = [];
 
-  const pickFrom = (lane: RetrievalLane | null, preferNewTopic = true) => {
-    const candidates = ranked.filter((spec) => !usedKeys.has(spec.key) && (!lane || spec.lane === lane));
-    const chosen = (preferNewTopic ? candidates.find((spec) => !usedTopics.has(spec.topic_family)) : null) || candidates[0] || null;
-    if (!chosen) return false;
-    selected.push(chosen);
-    usedKeys.add(chosen.key);
-    usedTopics.add(chosen.topic_family);
+  const add = (spec: QuerySpec | null, lane: RetrievalLane) => {
+    if (!spec || usedKeys.has(spec.key)) return false;
+    usedKeys.add(spec.key);
+    selected.push({ ...spec, lane });
     return true;
   };
 
-  if (count === 1) {
-    if (!pickFrom(preferredLane(now), false)) pickFrom(null, false);
-    return selected;
-  }
+  const exploitRanked = [...portfolio].sort((a, b) => exploitScore(b, metrics, totalRuns, now) - exploitScore(a, metrics, totalRuns, now));
+  add(exploitRanked[0] || null, "exploit");
+  if (selected.length >= count) return selected;
 
-  const laneOrder: RetrievalLane[] = ["precision", "discovery", "broad"];
-  for (const lane of laneOrder) {
-    if (selected.length >= count) break;
-    pickFrom(lane, true);
-  }
-  while (selected.length < Math.min(count, ranked.length)) {
-    if (!pickFrom(null, true) && !pickFrom(null, false)) break;
+  const first = selected[0];
+  const exploreRanked = [...portfolio].sort((a, b) => exploreScore(b, metrics, totalRuns, now) - exploreScore(a, metrics, totalRuns, now));
+  const explore =
+    chooseCandidate(exploreRanked, usedKeys, (spec) => spec.topic_family !== first.topic_family && spec.intent_family !== first.intent_family) ||
+    chooseCandidate(exploreRanked, usedKeys, (spec) => spec.topic_family !== first.topic_family) ||
+    chooseCandidate(exploreRanked, usedKeys, () => true);
+  add(explore, "explore");
+  if (selected.length >= count) return selected;
+
+  const winner = winningPair(portfolio, metrics);
+  const expandRanked = [...portfolio].sort((a, b) => expansionScore(b, winner, metrics, totalRuns, now) - expansionScore(a, winner, metrics, totalRuns, now));
+  const expand = winner
+    ? chooseCandidate(expandRanked, usedKeys, (spec) =>
+      (spec.intent_family === winner.archetype || spec.topic_family === winner.topic) &&
+      !(spec.intent_family === winner.archetype && spec.topic_family === winner.topic)) ||
+      chooseCandidate(expandRanked, usedKeys, () => true)
+    : chooseCandidate(expandRanked, usedKeys, (spec) => !selected.some((item) => item.topic_family === spec.topic_family)) ||
+      chooseCandidate(expandRanked, usedKeys, () => true);
+  add(expand, "expand");
+
+  while (selected.length < Math.min(count, portfolio.length)) {
+    if (!add(chooseCandidate(exploreRanked, usedKeys, () => true), "explore")) break;
   }
   return selected;
 }
@@ -292,7 +378,7 @@ export function retrievalLimits() {
   const scheduler = retrievalPolicy.scheduler || {};
   return {
     freshness_minutes: Math.max(30, numberValue(retrievalPolicy.freshness_minutes, 1440)),
-    max_queries_web: Math.max(1, Math.floor(numberValue(scheduler.max_queries_web, 2))),
+    max_queries_web: Math.max(1, Math.floor(numberValue(scheduler.max_queries_web, 3))),
     max_queries_auto: Math.max(1, Math.floor(numberValue(scheduler.max_queries_auto, 1))),
     max_provider_calls_web: Math.max(1, Math.floor(numberValue(scheduler.max_provider_calls_web, 3))),
     max_provider_calls_auto: Math.max(1, Math.floor(numberValue(scheduler.max_provider_calls_auto, 1))),
