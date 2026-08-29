@@ -135,6 +135,37 @@ python -m backend.benchmarks.source_benchmark
 
 Outputs are written to `backend/benchmarks/output/` as CSV and JSON. The output directory is gitignored because real search results should not be committed by default.
 
+## Retrieval V4 feasibility benchmark
+
+Before wiring multi-signal acquisition into production, run the dedicated V4 benchmark. It compares three acquisition mechanisms under the **same three-call ceiling**:
+
+1. `known_intent_search` — the current Retrieval V3 lexical baseline using Xiaohongshu Note Search V4;
+2. `topic_free_intent_discovery` — Cross-Platform Search V1 using buyer-language only, without a software topic such as 网站/小程序/Python;
+3. `open_recent_discovery` — Cross-Platform Search V1 with the `keyword` parameter omitted entirely and only `source=XIAOHONGSHU + time window` supplied.
+
+The benchmark is quota-safe by default. This command performs **zero provider calls** and only prints the plan:
+
+```bash
+cd backend
+python -m benchmarks.retrieval_v4_feasibility
+```
+
+A real benchmark must be explicitly enabled:
+
+```bash
+cd backend
+JUSTONE_API_TOKEN=... python -m benchmarks.retrieval_v4_feasibility --execute --hours 24 --max-provider-calls 3
+```
+
+The hard `--max-provider-calls` ceiling prevents the benchmark from silently expanding. The first V4 feasibility run should stay at 3 calls so it can be compared directly with the current production scan budget.
+
+The JSON report records per-generator freshness plus two discovery metrics that matter most for the architecture decision:
+
+- `unique_contribution` — candidates only that generator found;
+- `discovery_novel_vs_known` — candidates discovered by the topic-free/open lanes that the V3 known-intent baseline did not see.
+
+Do not promote `open_recent_discovery` into production merely because it returns more rows. It must show useful freshness, acceptable normalization/URL coverage, and meaningful novel candidates. Semantic Buyer quality is evaluated in the next gate before a source receives production budget.
+
 ## Decision gate
 
 Do not wire any provider into production `scan` until we have at least one real benchmark run. A provider should only graduate to a production connector if:
