@@ -6,7 +6,7 @@ from .base import RawLead
 class MockConnector:
     name = "mock-xiaohongshu"
 
-    def fetch_latest(self) -> list[RawLead]:
+    def fetch_new_items(self) -> list[RawLead]:
         now = datetime.now(timezone.utc)
         return [
             RawLead(
@@ -15,6 +15,7 @@ class MockConnector:
                 title="有没有会做微信小程序的，有偿",
                 excerpt="想做一个预约和会员积分功能，最好能尽快沟通。",
                 published_at=now,
+                url="https://example.com/mock-xhs-001",
                 budget="预算可聊",
             ),
             RawLead(
@@ -23,6 +24,7 @@ class MockConnector:
                 title="公司想做英文官网，求靠谱开发",
                 excerpt="展示产品和询盘为主，需要手机端适配，项目可以聊报价。",
                 published_at=now,
+                url="https://example.com/mock-xhs-002",
                 budget="询价中",
             ),
             RawLead(
@@ -31,5 +33,9 @@ class MockConnector:
                 title="前端新手应该怎么学？求课程推荐",
                 excerpt="最近准备学习 HTML CSS JavaScript，有没有适合零基础的教程。",
                 published_at=now,
+                url="https://example.com/mock-xhs-003",
             ),
         ]
+
+    def fetch_latest(self) -> list[RawLead]:
+        return self.fetch_new_items()

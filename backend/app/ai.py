@@ -29,8 +29,14 @@ class OpenAIProvider(AIProvider):
             'budget_text':{'type':['string','null']},'reason':{'type':'string'},'confidence':{'type':'integer','minimum':0,'maximum':100},
             'signals':{'type':'array','items':{'type':'string'},'maxItems':8}},
             'required':['is_lead','need_type','intent_score','fit_score','urgency','budget_text','reason','confidence','signals'],'additionalProperties':False}
-        payload = {'model':self.model,'instructions':'判断内容是否为真实的软件开发外包/购买需求。学习、教程、泛讨论必须判为非 lead。只输出结构化结果。',
-                   'input':f'标题：{title}\n内容：{excerpt}', 'text':{'format':{'type':'json_schema','name':'lead_classification','strict':True,'schema':schema}}}
+        payload = {
+            'model': self.model,
+            'store': False,
+            'instructions': '判断内容是否为真实的软件开发外包/购买需求。学习、教程、泛讨论必须判为非 lead。只输出结构化结果。不要推断或输出个人敏感信息。',
+            'input': f'标题：{title}\n内容：{excerpt}',
+            'text': {'format': {'type': 'json_schema', 'name': 'lead_classification', 'strict': True, 'schema': schema}},
+            'max_output_tokens': 500,
+        }
         req = urllib.request.Request('https://api.openai.com/v1/responses', data=json.dumps(payload,ensure_ascii=False).encode(), headers={'Authorization':f'Bearer {self.api_key}','Content-Type':'application/json'})
         try:
             with urllib.request.urlopen(req, timeout=20) as r: data=json.load(r)
